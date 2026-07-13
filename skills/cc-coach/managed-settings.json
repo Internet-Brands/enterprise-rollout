@@ -1,0 +1,30 @@
+{
+  "extraKnownMarketplaces": {
+    "webmd-internal-tools": {
+      "source": {
+        "source": "git",
+        "url": "https://gitlab.webmd.com/asterix/community-marketplace.git"
+      },
+      "autoUpdate": true
+    },
+    "internetbrands-internal-tools": {
+      "source": {
+        "source": "git",
+        "url": "https://git.internetbrands.com/corp/ai/asterix/community-marketplace.git"
+      },
+      "autoUpdate": true
+    },
+    "enterprise-rollout": {
+      "source": {
+        "source": "git",
+        "url": "https://github.com/Internet-Brands/enterprise-rollout.git"
+      },
+      "autoUpdate": true
+    }
+  },
+  "enabledPlugins": {
+    "claude-code-token-coach@webmd-internal-tools": true,
+    "claude-code-token-coach-2@internetbrands-internal-tools": true,
+    "claude-code-token-coach@enterprise-rollout": true
+  }
+}

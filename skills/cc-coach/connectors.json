@@ -1,0 +1,28 @@
+{
+  "_comment": "HelpDesk routing connectors. Set 'enabled: true' and ensure the named env var is set (never put credentials here). When both are true the skill can route after the developer explicitly confirms.",
+  "youtrack": {
+    "enabled": false,
+    "base_url": "https://youtrack.example.com",
+    "project_id": "HD",
+    "token_env": "YOUTRACK_TOKEN"
+  },
+  "email": {
+    "enabled": false,
+    "smtp_host_env": "SMTP_HOST",
+    "smtp_port": 587,
+    "smtp_user_env": "SMTP_USER",
+    "smtp_pass_env": "SMTP_PASS",
+    "to": "helpdesk2@internetbrands.com",
+    "cc_developer": true
+  },
+  "gmail": {
+    "_comment": "Gmail connector — uses SMTP with an App Password (https://myaccount.google.com/apppasswords). Set GMAIL_FROM to your Gmail address and GMAIL_APP_PASSWORD to the 16-char app password. Never use your account password here.",
+    "enabled": false,
+    "gmail_from_env": "GMAIL_FROM",
+    "app_password_env": "GMAIL_APP_PASSWORD",
+    "smtp_host": "smtp.gmail.com",
+    "smtp_port": 587,
+    "to": "helpdesk2@internetbrands.com",
+    "cc_developer": true
+  }
+}

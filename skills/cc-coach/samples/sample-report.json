@@ -1,0 +1,197 @@
+{
+  "overall_score": 74.2,
+  "overall_grade": "C",
+  "sessions": 2,
+  "token_totals": {
+    "input": 4070,
+    "output": 1035,
+    "cache_creation": 10700,
+    "cache_read": 311300
+  },
+  "practices": {
+    "cache_efficiency": {
+      "metric": "95.5% cache-read share",
+      "value": 0.9547029778881835,
+      "score": 100,
+      "detail": "cache_read=311,300 creation=10,700 fresh_input=4,070",
+      "examples": [],
+      "action": "",
+      "weight": 25,
+      "grade": "A",
+      "observation": false
+    },
+    "targeted_reads": {
+      "metric": "50% of reads were small/bounded",
+      "value": 0.5,
+      "score": 50.0,
+      "detail": "reads=4 bounded(offset/limit)=2 large(>2000tok)=2",
+      "examples": [
+        "`/app/auth.py` \u2014 ~3,000 tok",
+        "`/app/auth.py` \u2014 ~3,000 tok"
+      ],
+      "action": "These whole-file reads cost ~6,000 tokens (and re-cost on every later turn). For each, Grep for the symbol you need, then Read with offset/limit around the hit.",
+      "weight": 18,
+      "grade": "F",
+      "observation": false
+    },
+    "output_size_discipline": {
+      "metric": "7.7% of tool outputs were oversized",
+      "value": 0.07692307692307693,
+      "score": 61.53846153846154,
+      "detail": "oversized(>5000tok)=1 of 13 results",
+      "examples": [
+        "`cat build.log` \u2014 ~10,000 tok"
+      ],
+      "action": "These outputs added ~10,000 tokens. Re-run them as `<cmd> | tail -50` or redirect to a file and Read a slice; for tests use `-q`/`--no-header` or filter to failures.",
+      "weight": 17,
+      "grade": "D",
+      "observation": false
+    },
+    "tool_error_rate": {
+      "metric": "7.7% tool-call error rate",
+      "value": 0.07692307692307693,
+      "score": 61.53846153846154,
+      "detail": "errors=1 of 13 results",
+      "examples": [
+        "Bash: `pytest`"
+      ],
+      "action": "Each failed call burned a round-trip. Confirm the path/command exists before calling; for Edit, copy the exact `old_string` from a fresh Read.",
+      "weight": 12,
+      "grade": "D",
+      "observation": false
+    },
+    "context_discipline": {
+      "metric": "peak session input ~267,010 tok, 1 compaction(s)",
+      "value": 267010,
+      "score": 80,
+      "detail": "max_session_input=267,010 compactions=1",
+      "examples": [],
+      "action": "1 auto-compaction(s) fired \u2014 that's lossy and token-heavy. Pre-empt it with /clear between tasks.",
+      "weight": 15,
+      "grade": "B",
+      "observation": false
+    },
+    "model_efficiency": {
+      "metric": "2/10 Opus turns looked trivial (~$0.02 saveable)",
+      "value": 0.2,
+      "score": 80.0,
+      "detail": "est. cost $0.25 \u00b7 opus:10turns/$0.22, sonnet:4turns/$0.03",
+      "examples": [],
+      "action": "2 of your 10 Opus turns were trivial (no tools, no thinking, short answer) \u2014 ~$0.02 of the $0.22 Opus spend. Use `/model sonnet` for routine work and switch to Opus only when you hit genuinely hard reasoning; Haiku for trivial edits.",
+      "weight": 13,
+      "grade": "B",
+      "observation": false
+    }
+  },
+  "observations": {
+    "redundant_reads": {
+      "metric": "1 redundant re-reads (25% of reads)",
+      "value": 0.25,
+      "score": 0,
+      "detail": "redundant_reads=1 reads=4",
+      "examples": [
+        "`/app/auth.py`"
+      ],
+      "action": "You already had these files in context. Scroll up instead of re-reading; only Read again after an Edit/Write changed the file on disk.",
+      "weight": 0,
+      "grade": "-",
+      "observation": true,
+      "claude_md": "Do not re-read files already in context unless they have changed on disk."
+    },
+    "native_search": {
+      "metric": "1 Bash search/read cmds (20% of Bash calls)",
+      "value": 0.2,
+      "score": 70.0,
+      "detail": "bash_search=1 bash_total=5",
+      "examples": [
+        "`cat build.log`"
+      ],
+      "action": "Replace these shell commands with native tools: `grep` \u2192 Grep, `find`/`ls` \u2192 Glob, `cat`/`head`/`tail file` \u2192 Read. They return scoped, cache-stable output instead of raw dumps.",
+      "weight": 0,
+      "grade": "-",
+      "observation": true,
+      "claude_md": "Prefer the Grep/Glob/Read tools over shell `cat`/`grep`/`find`/`ls` for searching and reading files."
+    },
+    "parallel_batching": {
+      "metric": "18% of tool turns batched 2+ calls",
+      "value": 0.18181818181818182,
+      "score": 45.45454545454545,
+      "detail": "batched_tool_msgs=2 tool_msgs=11",
+      "examples": [],
+      "action": "",
+      "weight": 0,
+      "grade": "-",
+      "observation": true,
+      "claude_md": "When tool calls are independent, issue them together in a single message."
+    },
+    "subagent_offloading": {
+      "metric": "0 subagent (Task) delegations",
+      "value": 0,
+      "score": 60,
+      "detail": "task_calls=0",
+      "examples": [],
+      "action": "",
+      "weight": 0,
+      "grade": "-",
+      "observation": true,
+      "claude_md": "For broad codebase exploration or multi-file searches, delegate to a subagent and return only conclusions."
+    }
+  },
+  "wasted_tokens": {
+    "whole_file_reads": 6000,
+    "oversized_outputs": 10000
+  },
+  "repos": [
+    {
+      "repo": "app",
+      "path": "/Users/me/app",
+      "branches": [
+        "main"
+      ],
+      "sessions": 1,
+      "turns": 10,
+      "commits": 1,
+      "pushes": 1,
+      "remotes": [],
+      "tokens": {
+        "input": 3210,
+        "output": 685,
+        "cache_creation": 9040,
+        "cache_read": 263800
+      },
+      "estimated_cost_usd": 0.22
+    },
+    {
+      "repo": "api",
+      "path": "/Users/me/api",
+      "branches": [
+        "feature/ratelimit"
+      ],
+      "sessions": 1,
+      "turns": 4,
+      "commits": 1,
+      "pushes": 0,
+      "remotes": [],
+      "tokens": {
+        "input": 860,
+        "output": 350,
+        "cache_creation": 1660,
+        "cache_read": 47500
+      },
+      "estimated_cost_usd": 0.03
+    }
+  ],
+  "cost": {
+    "estimated_total_usd": 0.25,
+    "by_tier": {
+      "opus": 0.22,
+      "sonnet": 0.03
+    },
+    "turns_by_tier": {
+      "opus": 10,
+      "sonnet": 4
+    },
+    "opus_simple_turns": 2,
+    "opus_simple_savings_usd": 0.02
+  }
+}

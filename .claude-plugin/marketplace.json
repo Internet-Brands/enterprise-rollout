@@ -1,0 +1,15 @@
+{
+  "name": "enterprise-rollout",
+  "displayName": "Enterprise Rollout",
+  "description": "Enterprise rollout distribution of internal Claude Code tools.",
+  "owner": {
+    "name": "Asterix Team"
+  },
+  "plugins": [
+    {
+      "name": "claude-code-token-coach",
+      "source": "./skills/cc-coach",
+      "description": "Audits your Claude Code session history, grades token-optimization habits, and assembles IT budget-request packets."
+    }
+  ]
+}

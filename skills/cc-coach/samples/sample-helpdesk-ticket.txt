@@ -1,0 +1,25 @@
+Subject: Claude Code budget-increase request — Jane Dev
+
+Requested by: Jane Dev
+Period analyzed: May 2026
+Current cap: $50.00
+Requested cap: $120.00
+Spend this period: $47.80
+
+Efficiency grade: C (74/100)
+Coach recommendation: Approve with conditions
+  Reasonable efficiency, but a large increase — approve alongside the remediation commitments below and re-review next cycle.
+
+Repos worked in (via Claude Code):
+  - app [main] commits=1 pushes=1 cost~$0.22
+  - api [feature/ratelimit] commits=1 pushes=0 cost~$0.03
+
+Justification:
+  Owning the payments-service migration this quarter, which is edit-heavy across the app and api repos. Current cap is throttling mid-sprint; requesting headroom through Q3.
+
+Remediation commitments:
+  - Targeted reads: These whole-file reads cost ~6,000 tokens (and re-cost on every later turn). For each, Grep for the symbol you need, then Read with offset/limit around the hit.
+  - Output-size discipline: These outputs added ~10,000 tokens. Re-run them as `<cmd> | tail -50` or redirect to a file and Read a slice; for tests use `-q`/`--no-header` or filter to failures.
+  - Tool-call error rate: Each failed call burned a round-trip. Confirm the path/command exists before calling; for Edit, copy the exact `old_string` from a fresh Read.
+
+Full efficiency + repo audit attached: budget-request-packet.md

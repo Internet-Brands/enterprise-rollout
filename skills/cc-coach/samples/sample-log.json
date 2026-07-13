@@ -1,0 +1,42 @@
+[
+  {
+    "timestamp": "2026-06-15T17:49:09Z",
+    "event": "generated",
+    "developer": "Jane Dev",
+    "period": "May 2026",
+    "current_cap": 150.0,
+    "requested_cap": 300.0,
+    "spend": 142.5,
+    "spend_source": "authoritative",
+    "grade": "C",
+    "overall_score": 74.2,
+    "recommendation": "Approve with conditions",
+    "approval_route": "Within standard approval (increase $150.00 \u2264 $150.00)",
+    "helpdesk": "IT HelpDesk",
+    "packet_sha256": "09c7a0692f9903365e205b5c1f137a2be07cce25720584ab346dbde199bdf743",
+    "outputs": {
+      "packet": "/var/folders/kb/9nfkk1q17_l6mdjtzkwzlsgr0000gn/T/tmp.z61AZozg9I/packetA.md",
+      "ticket": "/var/folders/kb/9nfkk1q17_l6mdjtzkwzlsgr0000gn/T/tmp.z61AZozg9I/ticketA.txt"
+    }
+  },
+  {
+    "timestamp": "2026-06-15T17:49:09Z",
+    "event": "generated",
+    "developer": "Jane Dev",
+    "period": "May 2026",
+    "current_cap": 150.0,
+    "requested_cap": 350.0,
+    "spend": 0.25,
+    "spend_source": "estimate",
+    "grade": "C",
+    "overall_score": 74.2,
+    "recommendation": "Approve with conditions",
+    "approval_route": "Requires Joe's approval (increase $200.00 exceeds the $150.00 self-approve limit)",
+    "helpdesk": "IT HelpDesk",
+    "packet_sha256": "470dbef4090858c2a87eff94a6fcf0f2ec5172a1e766c18ea0083a70251823e9",
+    "outputs": {
+      "packet": "/var/folders/kb/9nfkk1q17_l6mdjtzkwzlsgr0000gn/T/tmp.z61AZozg9I/packetB.md",
+      "ticket": "/var/folders/kb/9nfkk1q17_l6mdjtzkwzlsgr0000gn/T/tmp.z61AZozg9I/ticketB.txt"
+    }
+  }
+]

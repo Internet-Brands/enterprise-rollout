@@ -1,0 +1,5 @@
+{
+  "name": "claude-code-token-coach",
+  "description": "Audits your Claude Code session history, grades token-optimization habits, and assembles IT budget-request packets.",
+  "version": "1.0.6"
+}

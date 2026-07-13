@@ -1,0 +1,12 @@
+# Generated reports — never distribute these with the skill
+User.md
+User.pdf
+IT.md
+IT.pdf
+report.json
+report.md
+report.pdf
+budget-request-packet.md
+helpdesk-ticket.txt
+log.json
+__pycache__/
