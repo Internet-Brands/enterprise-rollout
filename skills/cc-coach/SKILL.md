@@ -88,19 +88,23 @@ before running, and prints a clear install instruction if either is missing.
 
 **macOS / Linux (`run.sh`):**
 ```bash
-bash run.sh --json-out report.json
-# scope options:
+bash run.sh --days 30 --json-out report.json
+# narrower scope options:
 bash run.sh --project ~/.claude/projects/-Users-me-myapp
-bash run.sh --days 30
+bash run.sh --session path/to/<id>.jsonl
 ```
 
 **Windows (`run.ps1`):**
 ```powershell
-.\run.ps1 --json-out report.json
-# scope options:
+.\run.ps1 --days 30 --json-out report.json
+# narrower scope options:
 .\run.ps1 --project ~\.claude\projects\-Users-me-myapp
-.\run.ps1 --days 30
+.\run.ps1 --session path\to\<id>.jsonl
 ```
+
+Always pass `--days 30` for the standard report — it covers **every project**
+active in the window. (With no scope flags the analyzer also defaults to all
+projects / last 30 days; it must never analyze a subset of projects silently.)
 
 All arguments are forwarded to `analyze.py` unchanged. If `python3` is not on
 `PATH`, the wrapper exits immediately with OS-specific install instructions.

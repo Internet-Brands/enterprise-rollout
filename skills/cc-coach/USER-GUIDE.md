@@ -154,7 +154,7 @@ Scope options:
 - `--days N` — only sessions active in the last N days (across all projects)
 - `--project ~/.claude/projects/<encoded-dir>` — a single project
 - `--session path/to/<id>.jsonl` — a single session
-- *(no flags)* — just your newest project's sessions
+- *(no flags)* — same as `--days 30`: **all projects** active in the last 30 days
 
 Then the budget packet:
 

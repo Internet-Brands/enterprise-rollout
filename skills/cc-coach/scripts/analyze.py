@@ -1268,17 +1268,19 @@ def discover(args):
         main_files = glob.glob(os.path.join(root, "*", "*.jsonl"))
         subagent_files = glob.glob(os.path.join(root, "*", "*", "subagents", "*.jsonl"))
 
-    if args.days:
-        cutoff = datetime.now().timestamp() - args.days * 86400
+    # Default scope: ALL projects, last 30 days. (The old default of "newest
+    # project only" silently dropped every other project's sessions and
+    # produced incomplete reports.)
+    days = args.days
+    if not days and args.project is None and args.session is None:
+        days = 30
+        print("Scope: all projects, last 30 days (default — pass --days, "
+              "--project or --session to change)", file=sys.stderr)
+
+    if days:
+        cutoff = datetime.now().timestamp() - days * 86400
         main_files = [f for f in main_files if os.path.getmtime(f) >= cutoff]
         subagent_files = [f for f in subagent_files if os.path.getmtime(f) >= cutoff]
-
-    if args.project is None and args.session is None and not args.days and main_files:
-        # default: just the newest project's files to keep it fast
-        newest = max(main_files, key=os.path.getmtime)
-        proj_dir = os.path.dirname(newest)
-        main_files = glob.glob(os.path.join(proj_dir, "*.jsonl"))
-        subagent_files = glob.glob(os.path.join(proj_dir, "*", "subagents", "*.jsonl"))
 
     return (sorted(main_files, key=os.path.getmtime),
             sorted(subagent_files, key=os.path.getmtime))
