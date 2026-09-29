@@ -63,6 +63,14 @@ Key fields the analyzer relies on (all confirmed present):
 - `message.content` blocks: `text`, `thinking`, `tool_use` (`{id,name,input}`),
   and `tool_result` (`{tool_use_id,content,is_error}`) inside later `user` entries.
 - `cwd` and `gitBranch` on each entry → which **repo/branch** the work happened in.
+  Repo attribution resolves the actual git project root for each `cwd`
+  (walking up for the nearest `.git`), not just the raw working-directory
+  name — so a workspace folder containing several nested repos, or a monorepo
+  with `cwd` varying across sub-packages, is attributed correctly instead of
+  collapsing into one folder or fragmenting into several (see
+  `resolve_git_root()` in `analyze.py`). When no `.git` is found (e.g. the
+  transcript was exported from another machine and the directory doesn't
+  exist locally), it falls back to the basename of `cwd`, same as before.
 - `system` entries mark compaction boundaries.
 
 This local source is always available and stays on the developer's machine.
@@ -227,39 +235,20 @@ change, `--no-log` to skip). Each entry holds the spend figures, spend source
 (authoritative vs. estimate), grade, recommendation, approval route, and a
 **SHA-256 of the packet** — never code, prompt contents, or secrets.
 
-### Step 5 — Route to HelpDesk **only after explicit confirmation**
+### Step 5 — Submission is manual, by the developer
 
-**This is a hard gate. Never auto-send.** Show the developer the full packet and
-ticket, then ask them to confirm before anything leaves.
+**The skill never sends anything.** It only generates the reports; routing them
+to the HelpDesk is a manual step the developer performs themselves:
 
-```bash
-# Preview what would be sent (no email dispatched):
-python3 scripts/send_report.py --packet budget-request-packet.md \
-    --ticket helpdesk-ticket.txt --dev "<name>" --period "<period>"
+- For a standard cap increase: the developer opens a ticket with the IT
+  HelpDesk and attaches `IT.pdf` (the 2c call-to-action already tells them
+  this), including current cap, requested cap, and a one-line justification.
+- If the fuller packet was built (steps 3–4): they attach
+  `budget-request-packet.md` and/or paste `helpdesk-ticket.txt` into the
+  ticket themselves, after reviewing.
 
-# Send only after the developer says yes:
-python3 scripts/send_report.py --packet budget-request-packet.md \
-    --ticket helpdesk-ticket.txt --dev "<name>" --period "<period>" --confirm
-```
-
-The script auto-selects the first enabled connector whose credentials are present
-(priority: **gmail** → **email**). If neither is ready it exits with instructions.
-
-**Gmail connector setup** (one-time):
-1. Go to https://myaccount.google.com/apppasswords and generate a 16-char App Password.
-2. Set `enabled: true` under `gmail` in `connectors.json`.
-3. Export two env vars (add to `~/.zshrc` / `~/.bashrc` so they persist):
-   ```bash
-   export GMAIL_FROM="you@gmail.com"
-   export GMAIL_APP_PASSWORD="xxxx xxxx xxxx xxxx"
-   ```
-4. Run the dry-run above to verify before the first real send.
-
-**No connector** — hand the developer `budget-request-packet.md` and
-`helpdesk-ticket.txt` to submit themselves.
-
-The developer must see exactly what will be sent — including the repo audit —
-before it goes anywhere.
+Do not offer to send, email, or submit anything on the developer's behalf, and
+do not describe any automated submission channel — none exists.
 
 ## What is and isn't trackable
 
@@ -301,11 +290,12 @@ grade tempered by the size of the requested increase (`build_packet.py:recommend
 
 ## Governance & privacy
 
-- **Sending to HelpDesk is a permissioned action** — generate, let the developer
-  review, confirm, then send. No standing auto-forward.
-- **Transparency over monitoring** — the developer sees the full packet,
-  including the repo audit, before it's routed. The repo audit carries repo
-  names, branches, and counts only — **never code contents**.
+- **The skill only generates reports — it never submits them.** The developer
+  reviews the output and attaches `IT.pdf` (or the packet) to a HelpDesk
+  ticket themselves. There is no automated sending of any kind.
+- **Transparency over monitoring** — the developer sees everything that will
+  reach IT before they submit it. The repo audit carries repo names, branches,
+  and counts only — **never code contents**.
 - **Estimated ≠ authoritative spend** — the transcript dollar figure is a
   relative efficiency signal; reconcile against billing before a final cap decision.
 
@@ -315,18 +305,14 @@ grade tempered by the size of the requested increase (`build_packet.py:recommend
 - `IT.md` / `IT.pdf` — manager / IT HelpDesk report: spend, repo activity,
   efficiency verdict; no session details, paths, or prompt contents (always).
 - `report.json` — machine feed for the budget packet (always).
-- `budget-request-packet.md` — one-page IT/HelpDesk packet (budget requests).
-- `helpdesk-ticket.txt` — pre-filled ticket body (budget requests).
-- `log.json` — append-only audit log of packet generation (and, once a connector
-  is wired, submission). Metrics + packet hash only; no code or secrets.
+- `budget-request-packet.md` — one-page IT/HelpDesk packet (optional, budget requests).
+- `helpdesk-ticket.txt` — pre-filled ticket body the developer can paste into
+  their HelpDesk ticket (optional, budget requests).
+- `log.json` — append-only audit log of packet generation. Metrics + packet
+  hash only; no code or secrets.
 
-## Deferred (manual fallback in place)
-
-These are intentionally not yet automated; the skill works without them:
-
-- **HelpDesk routing connectors** (YouTrack / email) — until wired, the developer
-  attaches `budget-request-packet.md` / pastes `helpdesk-ticket.txt` themselves
-  after reviewing. The confirmation gate (never auto-send) still applies.
+All outputs stay on the developer's machine — submission to the HelpDesk is
+always a manual step by the developer (see step 5).
 
 ## Testing
 

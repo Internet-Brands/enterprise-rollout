@@ -5,9 +5,9 @@ A skill that audits **your own** Claude Code usage and does two things:
 1. **Coaches you** — grades how efficiently you use tokens/context and tells you exactly what to fix.
 2. **Builds your budget request** — when you need a higher spend cap, it generates a one-page packet for the IT HelpDesk (efficiency scorecard, the repos your budget is spent on, your justification, and remediation commitments).
 
-You run it; it reads the session history Claude Code already saved on your machine. **Nothing leaves your machine unless you explicitly approve sending it.**
+You run it; it reads the session history Claude Code already saved on your machine. **The skill only generates reports — nothing leaves your machine unless you submit it yourself.**
 
-> **When do I need this?** Per policy, any request to raise your Claude Code spend cap must include a Coach audit. Run the skill, review the packet, and submit it with your request.
+> **When do I need this?** Per policy, any request to raise your Claude Code spend cap must include a Coach audit. Run the skill, review `IT.pdf`, and attach it to your HelpDesk ticket.
 
 ---
 
@@ -113,7 +113,7 @@ figure in the reports and packet. You'll only be asked for a spend number if
 that lookup fails (e.g. off VPN), in which case the transcript estimate is used
 and clearly labelled as an estimate.
 
-It then produces your coaching report **and** the budget packet, and shows you everything **before** anything is sent.
+It then produces your reports — you review them and submit the IT report to the HelpDesk yourself (section 6).
 
 ## 5. What you get
 
@@ -128,35 +128,113 @@ Every run produces **two reports, each in Markdown and PDF**:
 
 ## 6. Submitting to the HelpDesk
 
-The skill **never auto-sends.** It shows you the full packet — including the repo audit — and waits for your OK. After you approve, either:
+The skill **generates the reports only — it never sends anything.** Submission
+is a manual step you do yourself:
 
-- it submits through a connected channel if your org set one up, **or**
-- you attach `budget-request-packet.md` (and/or paste `helpdesk-ticket.txt`) into your HelpDesk ticket yourself.
+1. Run the skill; it produces `User.md`/`User.pdf` (your coaching report) and
+   `IT.md`/`IT.pdf` (the manager / IT view).
+2. Review `IT.pdf` — it's the document IT uses to decide on a budget increase,
+   and it contains only spend, repo activity, and the efficiency verdict (no
+   session details, file paths, or prompt contents).
+3. **Open a ticket with the IT HelpDesk and attach `IT.pdf`**, including your
+   current cap, requested cap, and a one-line justification.
 
-You always see exactly what will be sent first.
+Nothing leaves your machine unless you attach and submit it yourself.
 
 ## 7. Run it manually (optional — no Claude Code session needed)
 
-The scripts are standalone. Use the platform wrapper, which checks for Python 3 and `reportlab` first, then writes `User.md`, `User.pdf`, `IT.md`, `IT.pdf` to the current directory:
+You don't need an active Claude Code session for this. The scripts are standalone: you find the skill's folder, open a terminal there, and run two Python scripts yourself. Use this if you'd rather not ask Claude to run it, or if the skill isn't responding inside Claude Code and you want the reports anyway.
+
+### Step 1: Find the skill's folder
+
+Where the folder lives depends on how you got the skill.
+
+**If it's the managed plugin (most people)** it lives under a per-version folder in the plugin cache:
+
+- **macOS / Linux:**
+  `~/.claude/plugins/cache/<marketplace>/<plugin-name>/<version>/`
+- **Windows:**
+  `%USERPROFILE%\.claude\plugins\cache\<marketplace>\<plugin-name>\<version>\`
+
+  `<marketplace>` is `webmd-internal-tools` or `enterprise-rollout` (gitlab.webmd.com) or `internetbrands-internal-tools` (git.internetbrands.com). `<plugin-name>` is `claude-code-token-coach` or `claude-code-token-coach-2`. `<version>` is whatever the current release is (e.g. `1.0.10`) — list the folder to see it rather than guessing:
+
+  ```bash
+  # macOS / Linux
+  ls ~/.claude/plugins/cache/*/claude-code-token-coach*/
+  ```
+
+  ```powershell
+  # Windows (PowerShell)
+  Get-ChildItem "$env:USERPROFILE\.claude\plugins\cache\*\claude-code-token-coach*\"
+  ```
+
+  You're looking for the folder that contains `run.sh`, `run.ps1`, and a `scripts/` subfolder — that's the one to `cd` into.
+
+**If you have this repo checked out directly** (e.g. you're contributing to the skill itself), the folder is `skills/cc-coach/` inside your checkout of this repository — no searching needed.
+
+### Step 2: Open a terminal there
+
+- **macOS:** Terminal.app, or right-click the folder in Finder → **New Terminal at Folder**.
+- **Linux:** your terminal emulator, then `cd` to the path from Step 1.
+- **Windows:** PowerShell (search "PowerShell" in the Start menu), then `cd` to the path from Step 1. `cmd.exe` also works for `python`/`pip` commands, but the wrapper script (`run.ps1`) needs PowerShell specifically.
+
+```bash
+# macOS / Linux example
+cd ~/.claude/plugins/cache/webmd-internal-tools/claude-code-token-coach/1.0.10
+```
+
+```powershell
+# Windows example
+cd "$env:USERPROFILE\.claude\plugins\cache\webmd-internal-tools\claude-code-token-coach\1.0.10"
+```
+
+### Step 3: Confirm Python 3 and `reportlab` are available
+
+The wrapper script (next step) checks both of these for you and prints install instructions if either is missing — but you can check yourself first:
+
+```bash
+# macOS / Linux
+python3 --version
+python3 -c "import reportlab" && echo "reportlab OK"
+```
+
+```powershell
+# Windows
+python3 --version
+python3 -c "import reportlab"
+```
+
+On Windows, if `python3` isn't recognized, try `python` or `py` instead — some installers only register one of the three.
+
+If `reportlab` isn't installed, install it now (see the **reportlab** entry under *Common errors* below for exact commands) or just proceed — the wrapper still produces the Markdown reports without it.
+
+### Step 4: Run the analyzer
+
+The wrapper writes `User.md`, `User.pdf`, `IT.md`, `IT.pdf` to your **current directory**:
 
 ```bash
 # macOS / Linux — last 30 days across all projects
 bash run.sh --days 30 --json-out report.json
+```
 
+```powershell
 # Windows
 .\run.ps1 --days 30 --json-out report.json
 ```
 
-`report.json` is the machine feed used to build the budget packet (next step). Run the wrapper from the skill's folder (for a managed-plugin install it lives under `~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/`).
+`report.json` is the machine feed used to build the budget packet (Step 5). When it finishes, confirm the four report files landed where you expect — the script prints each file's full path as it writes it.
 
-Scope options:
+Scope options (same on both platforms):
 
 - `--days N` — only sessions active in the last N days (across all projects)
 - `--project ~/.claude/projects/<encoded-dir>` — a single project
 - `--session path/to/<id>.jsonl` — a single session
+- `--out-dir path/to/folder` — write the reports somewhere other than the current directory
 - *(no flags)* — same as `--days 30`: **all projects** active in the last 30 days
 
-Then the budget packet:
+### Step 5 (optional): Build the budget packet
+
+Only needed if you're requesting a cap increase. Same command on macOS, Linux, and Windows — this one is plain Python, not a platform wrapper:
 
 ```bash
 python3 scripts/build_packet.py --report report.json \
@@ -166,7 +244,61 @@ python3 scripts/build_packet.py --report report.json \
   --out-md budget-request-packet.md --out-ticket helpdesk-ticket.txt
 ```
 
+On Windows, use `python` instead of `python3` if that's what Step 3 confirmed works.
+
 Omit `--actual-spend` and the packet automatically uses the authoritative billing figure that analyze.py embedded in `report.json`; if that's absent too (API unreachable), it falls back to the transcript estimate, clearly labeled.
+
+### Common errors when running manually
+
+**`reportlab is required for PDF generation` / `PDF generation failed: reportlab is required...`**
+This means Python ran fine but the `reportlab` package isn't installed, so only the `.md` files were written (no PDFs). Fix:
+
+```bash
+# macOS / Linux
+pip3 install reportlab
+# or, to install every dependency the skill needs at once:
+pip3 install -r requirements.txt
+```
+
+```powershell
+# Windows
+pip install reportlab
+# or:
+pip install -r requirements.txt
+```
+
+If `pip3 install` fails with a permissions error, add `--user` (e.g. `pip3 install --user reportlab`), or create a virtual environment first:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate       # macOS / Linux
+.venv\Scripts\Activate.ps1      # Windows
+pip install reportlab
+```
+
+Then re-run `run.sh` / `run.ps1` from that same shell — reports regenerate with PDFs included.
+
+**`python3: command not found` (macOS/Linux) or `'python3' is not recognized...` (Windows)**
+Python 3 isn't on your PATH. Install it (see section 1), or on Windows try `python` or `py` in place of `python3` in every command above — the wrapper (`run.ps1`) already tries all three automatically.
+
+**`permission denied` when running `./run.sh`**
+You invoked it directly instead of through `bash`. Either run it via `bash run.sh ...` (as shown above — this never needs execute permission) or make it executable once with `chmod +x run.sh` and then run `./run.sh ...`.
+
+**`running scripts is disabled on this system` (Windows, running `.\run.ps1`)**
+PowerShell's execution policy is blocking local scripts. Either bypass it for just this one run:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File run.ps1 --days 30 --json-out report.json
+```
+
+or allow locally-created scripts for your user going forward:
+
+```powershell
+Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
+```
+
+**`No .jsonl transcripts found under ~/.claude/projects. Pass --session or --project.`**
+No Claude Code session history was found at the default location, or your `--days`/`--project`/`--session` scope excluded everything that exists. Try a wider window (`--days 60`), confirm you're pointing at the right `--project` path, or drop the flag entirely to fall back to the last-30-days default across all projects.
 
 ## 8. How you're graded — and what *isn't* graded
 

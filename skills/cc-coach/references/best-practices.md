@@ -211,6 +211,32 @@ State these to the user as caveats; do not fabricate scores.
 
 ---
 
+## Repo attribution (repo check-in audit)
+
+The repo table backing both the coaching report and the IT budget packet's
+repo check-in audit is keyed off the actual git repository, not the raw `cwd`
+string in the transcript. For each `cwd` seen, `analyze.py`'s
+`resolve_git_root()` walks upward from `cwd` looking for a `.git` entry (a
+directory for a normal repo, or a file for a submodule/worktree) and returns
+the nearest ancestor that has one — that root is the bucket key, and its
+basename is the display name shown in the tables.
+
+- A workspace folder that contains several independent nested repos (e.g.
+  `~/workspace/service-a`, `~/workspace/service-b`, each its own `.git`) is
+  attributed as separate rows, keyed by each repo's own root — the shared
+  parent folder is never used as a bucket by itself.
+- A monorepo where `cwd` varies across sub-packages (`frontend/`, `backend/`,
+  ...) collapses into a single row, keyed by the monorepo's root.
+- If no `.git` is found within a bounded walk — including the common case of
+  analyzing transcripts on a different machine than the one they were
+  recorded on, where the referenced directories don't exist locally — the row
+  falls back to the basename of `cwd`, same as the analyzer's historical
+  behavior. The repo is still surfaced, never silently dropped.
+- Lookups are memoized per unique `cwd` for the run, so this costs at most one
+  filesystem walk per distinct working directory, not per transcript line.
+
+---
+
 ## Tuning guide
 
 - Weights: `analyze.py:WEIGHTS` (scored set; keep the sum at 100). Moving a

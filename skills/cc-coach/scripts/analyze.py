@@ -174,6 +174,65 @@ def parse_ts(s):
 
 
 # ----------------------------------------------------------------------------
+# Git repo-root resolution (handles nested/multi-repo working folders)
+# ----------------------------------------------------------------------------
+def resolve_git_root(cwd, cache, max_depth=20):
+    """
+    Walk upward from `cwd` looking for a `.git` entry (dir, or a file for
+    submodules/worktrees) at each ancestor level, including `cwd` itself.
+
+    Returns the first ancestor that has one, or None if none is found within
+    `max_depth` levels or before reaching the filesystem root — which also
+    covers `cwd` not existing on this machine at all (a colleague's exported
+    transcript, or a repo since deleted/moved).
+
+    Results are memoized in `cache`, keyed by the raw `cwd` string, so a `cwd`
+    seen many times in one run costs at most one filesystem walk.
+    """
+    if not cwd:
+        return None
+    if cwd in cache:
+        return cache[cwd]
+
+    root = None
+    try:
+        current = os.path.abspath(cwd)
+        for _ in range(max_depth):
+            if os.path.exists(os.path.join(current, ".git")):
+                root = current
+                break
+            parent = os.path.dirname(current)
+            if parent == current:
+                break
+            current = parent
+    except OSError:
+        root = None
+
+    cache[cwd] = root
+    return root
+
+
+def repo_bucket(cwd, cache):
+    """
+    Resolve a transcript `cwd` to (bucket_key, display_name, path_for_report).
+
+    bucket_key   — unique key for s.repos: the resolved git root's path when
+                   found (guarantees two same-named-but-different folders don't
+                   collide), else the basename fallback (today's behavior).
+    display_name — what tables show: the resolved root's basename, else the
+                   same fallback string.
+    path_for_report — what report.json's repos[].path records: the resolved
+                   root (full path) when found, else the raw cwd.
+    """
+    root = resolve_git_root(cwd, cache)
+    if root and os.path.isdir(root):
+        display = os.path.basename(root.rstrip(os.sep)) or root
+        return root, display, root
+    fallback = os.path.basename(cwd.rstrip("/")) or cwd
+    return fallback, fallback, cwd
+
+
+# ----------------------------------------------------------------------------
 # Core: walk a list of session files and accumulate raw signals
 # ----------------------------------------------------------------------------
 class Stats:
@@ -247,12 +306,17 @@ class Stats:
         self.error_items = []          # [(tool_name, snippet)]
         self.heaviest_session = None   # (path, tokens)
 
-        # repos worked in (derived from per-entry cwd / gitBranch + git Bash calls)
+        # repos worked in (derived from per-entry cwd / gitBranch + git Bash calls).
+        # Bucket key is the resolved git repo root (falls back to basename of
+        # cwd when no .git is found) — see resolve_git_root()/repo_bucket().
         self.repos = defaultdict(lambda: {
-            "path": "", "branches": set(), "sessions": set(),
+            "name": "", "path": "", "branches": set(), "sessions": set(),
             "turns": 0, "commits": 0, "pushes": 0, "remotes": set(),
             "input": 0, "output": 0, "cache_creation": 0,
             "cache_read": 0, "cost": 0.0})
+        # cwd -> resolved git root (or None), shared across analyze_files and
+        # fold_subagent_tokens so a cwd is walked at most once per run.
+        self.repo_root_cache = {}
 
 
 # Patterns that indicate an error is NOT attributable to the developer:
@@ -345,9 +409,10 @@ def analyze_files(files):
 
             cwd = entry.get("cwd")
             if cwd:
-                current_repo = os.path.basename(cwd.rstrip("/")) or cwd
+                current_repo, display_name, report_path = repo_bucket(cwd, s.repo_root_cache)
                 R = s.repos[current_repo]
-                R["path"] = cwd
+                R["name"] = display_name
+                R["path"] = report_path
                 gb = entry.get("gitBranch")
                 if gb:
                     R["branches"].add(gb)
@@ -538,9 +603,10 @@ def fold_subagent_tokens(subagent_files, s):
 
             cwd = entry.get("cwd")
             if cwd:
-                current_repo = os.path.basename(cwd.rstrip("/")) or cwd
+                current_repo, display_name, report_path = repo_bucket(cwd, s.repo_root_cache)
                 R = s.repos[current_repo]
-                R["path"] = cwd
+                R["name"] = display_name
+                R["path"] = report_path
                 gb = entry.get("gitBranch")
                 if gb:
                     R["branches"].add(gb)
@@ -880,7 +946,8 @@ def _load_helpdesk_email():
 
 
 def render_user_md(s, P, ov_score, ov_letter, files, ai_commits_data=None,
-                   spend_data=None):
+                   spend_data=None, overlap_frac=None, prev_spend_data=None,
+                   now=None):
     L = []
     L.append("# Claude Code Token-Optimization Report\n")
     L.append(f"_Generated {datetime.now().strftime('%Y-%m-%d %H:%M')}_\n")
@@ -915,8 +982,11 @@ def render_user_md(s, P, ov_score, ov_letter, files, ai_commits_data=None,
     L.append("### Cost & model mix\n")
     if spend_data:
         _p = spend_data.get("period") or {}
-        L.append(f"Authoritative spend (billing): **${float(spend_data['spend_usd']):.2f}** "
-                 f"for {_p.get('month', '?')}/{_p.get('year', '?')} "
+        _now = now or datetime.now(timezone.utc)
+        _label = _billing_period_label(_p.get("month"), _p.get("year"), _now) \
+            if _p.get("month") and _p.get("year") else f"{_p.get('month', '?')}/{_p.get('year', '?')}"
+        L.append(f"Authoritative spend (billing, **{_label}**): "
+                 f"**${float(spend_data['spend_usd']):.2f}** "
                  f"(source: Anthropic cost report via Athena API"
                  + (f", refreshed {spend_data['data_refreshed_at']}"
                     if spend_data.get("data_refreshed_at") else "") + ").  ")
@@ -924,6 +994,21 @@ def render_user_md(s, P, ov_score, ov_letter, files, ai_commits_data=None,
             L.append(f"\n> ⚠️ {spend_data['user_message']}\n")
         L.append(f"Transcript estimate (this analysis window): **${s.cost_total:.2f}** "
                  f"— a relative efficiency signal at API list rates, not a bill.\n")
+        if overlap_frac is not None and overlap_frac < 0.5:
+            L.append(f"\n> ⚠️ The billing figure above covers only "
+                     f"~{overlap_frac*100:.0f}% of the analysis window below — most "
+                     f"of that window falls in the prior billing period.\n")
+        if float(spend_data["spend_usd"]) == 0.0 and s.cost_total > 0:
+            L.append(f"\n> ⚠️ Authoritative spend is $0.00 for the current billing "
+                     f"period even though the transcript estimate above is non-zero. "
+                     f"This is expected right after a monthly reset — it is not "
+                     f"missing data.\n")
+        if prev_spend_data:
+            _pp = prev_spend_data.get("period") or {}
+            _plabel = _billing_period_label(_pp.get("month"), _pp.get("year"), _now) \
+                if _pp.get("month") and _pp.get("year") else f"{_pp.get('month', '?')}/{_pp.get('year', '?')}"
+            L.append(f"Prior billing period (**{_plabel}**): "
+                     f"**${float(prev_spend_data['spend_usd']):.2f}**.\n")
     else:
         L.append(f"Estimated spend: **${s.cost_total:.2f}** "
                  f"(transcript estimate at current API rates — authoritative billing "
@@ -949,9 +1034,10 @@ def render_user_md(s, P, ov_score, ov_letter, files, ai_commits_data=None,
 
         L.append("| Repo | Branch(es) | GL Commits | AI Commits | Turns | Est. cost | Notes |\n"
                  "|---|---|--:|--:|--:|--:|---|")
-        for name, r in sorted(s.repos.items(), key=lambda kv: -kv[1]["cost"]):
+        for key, r in sorted(s.repos.items(), key=lambda kv: -kv[1]["cost"]):
+            display = r.get("name") or key
             br = ", ".join(sorted(r["branches"])) or "—"
-            commit_row = commit_by_repo.get(name)
+            commit_row = commit_by_repo.get(display)
             if commit_row:
                 gl_commits = str(commit_row.get("total_commits", "—"))
                 ai_commits = str(commit_row.get("ai_commits", "—"))
@@ -967,7 +1053,7 @@ def render_user_md(s, P, ov_score, ov_letter, files, ai_commits_data=None,
                 notes = ("⚠ not an org project" if not notes
                          else notes + "; ⚠ not an org project")
 
-            L.append(f"| {name} | {br} | {gl_commits} | {ai_commits} | "
+            L.append(f"| {display} | {br} | {gl_commits} | {ai_commits} | "
                      f"{r['turns']} | ${r['cost']:.2f} | {notes} |")
         L.append("")
 
@@ -1093,7 +1179,8 @@ def render_user_md(s, P, ov_score, ov_letter, files, ai_commits_data=None,
 
 
 def render_it_md(s, P, ov_score, ov_letter, files, ai_commits_data=None,
-                 spend_data=None):
+                 spend_data=None, overlap_frac=None, prev_spend_data=None,
+                 now=None):
     """IT/Manager-facing report: spend, repo audit, efficiency verdict. No session details."""
     L = []
     helpdesk = _load_helpdesk_email()
@@ -1113,15 +1200,33 @@ def render_it_md(s, P, ov_score, ov_letter, files, ai_commits_data=None,
 
     period_start = s.first_ts.strftime("%Y-%m-%d") if s.first_ts else "—"
     period_end   = s.last_ts.strftime("%Y-%m-%d")  if s.last_ts  else "—"
-    L.append(f"**Period:** {period_start} → {period_end}  ")
+    L.append(f"**Analysis window (transcripts):** {period_start} → {period_end}  ")
     L.append(f"**Sessions:** {s.sessions} main + {s.subagent_sessions} subagent  ")
     if spend_data:
         _p = spend_data.get("period") or {}
-        L.append(f"**Authoritative spend (billing, {_p.get('month','?')}/{_p.get('year','?')}):** "
+        _now = now or datetime.now(timezone.utc)
+        _label = _billing_period_label(_p.get("month"), _p.get("year"), _now) \
+            if _p.get("month") and _p.get("year") else f"{_p.get('month','?')}/{_p.get('year','?')}"
+        L.append(f"**Authoritative spend (billing, {_label}):** "
                  f"${float(spend_data['spend_usd']):.2f}"
                  + (f" _(refreshed {spend_data['data_refreshed_at']})_"
                     if spend_data.get("data_refreshed_at") else "") + "  ")
-        L.append(f"**Transcript estimate (analysis window):** ${s.cost_total:.2f}  ")
+        L.append(f"**Transcript estimate (analysis window above):** ${s.cost_total:.2f}  ")
+        if overlap_frac is not None and overlap_frac < 0.5:
+            L.append(f"\n> ⚠️ The billing figure above covers only "
+                     f"~{overlap_frac*100:.0f}% of the analysis window — most of "
+                     f"that window falls in the prior billing period.\n")
+        if float(spend_data["spend_usd"]) == 0.0 and s.cost_total > 0:
+            L.append(f"\n> ⚠️ Authoritative spend is $0.00 for the current billing "
+                     f"period even though the transcript estimate is non-zero. This "
+                     f"is expected right after a monthly reset — it is not missing "
+                     f"data, and should not be read as \"no spend to justify\".\n")
+        if prev_spend_data:
+            _pp = prev_spend_data.get("period") or {}
+            _plabel = _billing_period_label(_pp.get("month"), _pp.get("year"), _now) \
+                if _pp.get("month") and _pp.get("year") else f"{_pp.get('month','?')}/{_pp.get('year','?')}"
+            L.append(f"**Prior billing period ({_plabel}):** "
+                     f"${float(prev_spend_data['spend_usd']):.2f}  ")
     else:
         L.append(f"**Estimated spend (transcript-based — authoritative billing "
                  f"unavailable for this run):** ${s.cost_total:.2f}  ")
@@ -1151,12 +1256,13 @@ def render_it_md(s, P, ov_score, ov_letter, files, ai_commits_data=None,
                 commit_by_repo[row.get("repo", "")] = row
         L.append("| Repo | Branch(es) | GL Commits | AI Commits | Turns | Est. cost |\n"
                  "|---|---|--:|--:|--:|--:|")
-        for name, r in sorted(s.repos.items(), key=lambda kv: -kv[1]["cost"]):
+        for key, r in sorted(s.repos.items(), key=lambda kv: -kv[1]["cost"]):
+            display = r.get("name") or key
             br = ", ".join(sorted(r["branches"])) or "—"
-            commit_row = commit_by_repo.get(name)
+            commit_row = commit_by_repo.get(display)
             gl = str(commit_row.get("total_commits", "—")) if commit_row else "—"
             ai = str(commit_row.get("ai_commits", "—"))    if commit_row else "—"
-            L.append(f"| {name} | {br} | {gl} | {ai} | {r['turns']} | ${r['cost']:.2f} |")
+            L.append(f"| {display} | {br} | {gl} | {ai} | {r['turns']} | ${r['cost']:.2f} |")
         L.append("")
 
     L.append("## Efficiency verdict\n")
@@ -1189,6 +1295,39 @@ ORG_GITLAB_DOMAINS = {"gitlab.webmd.com", "git.internetbrands.com", "gitlab.merc
 
 # Authoritative spend API endpoint.
 SPEND_API_BASE = "https://athena.webmdhelios.com/api/claude-code/coach/spend"
+
+
+def _month_bounds(year: int, month: int):
+    """[start, end) of a calendar month, as tz-aware UTC datetimes."""
+    start = datetime(year, month, 1, tzinfo=timezone.utc)
+    end = (datetime(year + 1, 1, 1, tzinfo=timezone.utc) if month == 12
+           else datetime(year, month + 1, 1, tzinfo=timezone.utc))
+    return start, end
+
+
+def billing_overlap_fraction(window_start, window_end, month: int, year: int):
+    """Share of the analysis window [window_start, window_end) that falls
+    inside the given calendar month. A billing figure for `month`/`year`
+    only actually describes this much of the window it's displayed beside.
+    Returns None if the window bounds are unknown."""
+    if not window_start or not window_end or window_end <= window_start:
+        return None
+    m_start, m_end = _month_bounds(year, month)
+    overlap = min(window_end, m_end) - max(window_start, m_start)
+    overlap = max(overlap, timedelta(0))
+    return overlap / (window_end - window_start)
+
+
+def _billing_period_label(month: int, year: int, now) -> str:
+    """Explicit date range for a billing-period figure, e.g. '2026-09-01 →
+    2026-09-28'. Billing resets monthly, so this is often a different span
+    than the analysis window it's shown beside — spell it out rather than
+    letting a bare 'month/year' read as if it covers the same period."""
+    start, end = _month_bounds(year, month)
+    end = end - timedelta(days=1)
+    if year == now.year and month == now.month:
+        end = now  # current month is still accruing: label as month-to-date
+    return f"{start.date()} → {end.date()}"
 
 
 def fetch_authoritative_spend(email: str, month: int, year: int) -> dict:
@@ -1302,6 +1441,10 @@ def main():
     ap.add_argument("--project", help="a ~/.claude/projects/<dir> folder")
     ap.add_argument("--session", help="a single .jsonl transcript")
     ap.add_argument("--days", type=int, default=0, help="only sessions active in last N days")
+    ap.add_argument("--month", type=int, default=None,
+                    help="billing month to fetch authoritative spend for (default: current month)")
+    ap.add_argument("--year", type=int, default=None,
+                    help="billing year to fetch authoritative spend for (default: current year)")
     ap.add_argument("--json-out", default="")
     ap.add_argument("--out-dir", default="",
                     help="directory to write User.md, User.pdf, IT.md, IT.pdf "
@@ -1339,12 +1482,14 @@ def main():
             except Exception:
                 pass
     now = datetime.now(timezone.utc)
+    month = args.month or now.month
+    year = args.year or now.year
     ai_commits_data = fetch_ai_commits(
-        args.ai_commits_api, _email or "", now.month, now.year
+        args.ai_commits_api, _email or "", month, year
     )
 
     # Authoritative spend (billing) — best-effort; {} on failure
-    spend_data = fetch_authoritative_spend(_email or "", now.month, now.year)
+    spend_data = fetch_authoritative_spend(_email or "", month, year)
     if spend_data:
         print(f"Authoritative spend: ${float(spend_data['spend_usd']):.2f} "
               f"({spend_data.get('email', _email)})", file=sys.stderr)
@@ -1352,10 +1497,26 @@ def main():
         print("Authoritative spend unavailable — reports use the transcript "
               "estimate, clearly labelled.", file=sys.stderr)
 
+    # How much of the analysis window the billing month above actually covers.
+    # Billing resets monthly, so early in a month the figure can be accurate
+    # yet describe only a sliver of a multi-week analysis window — fetch the
+    # prior month too so the report can show the complete picture rather than
+    # a bare, easily-misread $0.00.
+    effective_days = args.days or 30
+    overlap_frac = billing_overlap_fraction(now - timedelta(days=effective_days), now,
+                                            month, year)
+    prev_spend_data = None
+    if overlap_frac is not None and overlap_frac < 0.5:
+        prev_month, prev_year = (month - 1, year) if month > 1 else (12, year - 1)
+        prev_spend_data = fetch_authoritative_spend(_email or "", prev_month, prev_year)
+        if prev_spend_data:
+            print(f"Prior-month spend: ${float(prev_spend_data['spend_usd']):.2f} "
+                  f"({prev_month}/{prev_year})", file=sys.stderr)
+
     user_md = render_user_md(s, P, ov_score, ov_letter, files, ai_commits_data,
-                             spend_data)
+                             spend_data, overlap_frac, prev_spend_data, now)
     it_md   = render_it_md(s, P, ov_score, ov_letter, files, ai_commits_data,
-                           spend_data)
+                           spend_data, overlap_frac, prev_spend_data, now)
     blob = {
         "overall_score": round(ov_score, 1),
         "overall_grade": ov_letter,
@@ -1378,7 +1539,8 @@ def main():
             "oversized_outputs": s.oversized_tokens_sum,
         },
         "repos": [
-            {"repo": name, "path": r["path"], "branches": sorted(r["branches"]),
+            {"repo": r.get("name") or key, "path": r["path"],
+             "branches": sorted(r["branches"]),
              "sessions": len(r["sessions"]), "turns": r["turns"],
              "commits": r["commits"], "pushes": r["pushes"],
              "remotes": sorted(r["remotes"]),
@@ -1386,7 +1548,7 @@ def main():
                         "cache_creation": r["cache_creation"],
                         "cache_read": r["cache_read"]},
              "estimated_cost_usd": round(r["cost"], 2)}
-            for name, r in sorted(s.repos.items(), key=lambda kv: -kv[1]["cost"])
+            for key, r in sorted(s.repos.items(), key=lambda kv: -kv[1]["cost"])
         ],
         "cost": {
             "estimated_total_usd": round(s.cost_total, 2),
@@ -1396,6 +1558,9 @@ def main():
             "opus_simple_savings_usd": round(s.opus_simple_savings, 2),
         },
         "authoritative_spend": spend_data or None,
+        "authoritative_spend_prior_month": prev_spend_data or None,
+        "billing_window_overlap_frac": (round(overlap_frac, 3)
+                                        if overlap_frac is not None else None),
         "ai_commits_data": ai_commits_data,
     }
 

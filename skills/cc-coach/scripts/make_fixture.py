@@ -4,6 +4,12 @@
 Writes two sessions into one project folder, each with a different cwd/repo and
 git check-ins, so the repo-audit and budget-packet paths have content to work
 with. Pass an output root dir (default: ./fixture_projects).
+
+Also writes a third session exercising resolve_git_root() / repo_bucket()
+(nested and multi-repo `cwd` resolution:
+  (a) one workspace folder containing two independent nested git repos
+  (b) one repo with `cwd` varying across sub-packages (should collapse to one)
+  (c) a `cwd` pointing at a directory that doesn't exist on this machine
 """
 import json, os, sys
 
@@ -121,4 +127,91 @@ def s2(asst, user):
 
 n1 = build("11111111-2222-3333-4444-555555555555", "/Users/me/app", "main", s1)
 n2 = build("99999999-8888-7777-6666-555555555555", "/Users/me/api", "feature/ratelimit", s2)
-print(f"wrote {n1}+{n2} lines into {proj}")
+
+
+# ---- Session 3: git-root resolution scenarios ----
+def make_git_marker(path, submodule=False):
+    """Create a real `.git` dir (normal repo) or `.git` file (submodule/worktree
+    style pointer) at `path` so resolve_git_root() finds it on disk."""
+    os.makedirs(path, exist_ok=True)
+    git_path = os.path.join(path, ".git")
+    if submodule:
+        with open(git_path, "w") as f:
+            f.write("gitdir: ../.git/modules/sub\n")
+    else:
+        os.makedirs(git_path, exist_ok=True)
+
+
+def usage(n=300):
+    return {"input_tokens": n, "output_tokens": n // 5,
+            "cache_creation_input_tokens": n // 2, "cache_read_input_tokens": n * 4}
+
+
+def build_multi_cwd(sid, entries):
+    """entries: [(cwd, branch, kind, payload)] where payload is content blocks
+    for kind 'u', or (blocks, usage, model) for kind 'a'. Unlike build(), cwd
+    can vary per line so we can exercise multiple repo roots in one session."""
+    out = []
+    for i, (cwd, branch, kind, payload) in enumerate(entries):
+        ts = "2026-06-03T09:%02d:00Z" % (i % 60)
+        base = {"uuid": f"m{i}", "parentUuid": None, "timestamp": ts,
+                "sessionId": sid, "cwd": cwd, "gitBranch": branch}
+        if kind == "u":
+            out.append(json.dumps({**base, "type": "user",
+                                    "message": {"role": "user", "content": payload}}))
+        else:
+            blocks, use, model = payload
+            out.append(json.dumps({**base, "type": "assistant", "version": "1.0",
+                                    "message": {"role": "assistant", "model": model,
+                                                "content": blocks, "usage": use}}))
+    with open(os.path.join(proj, sid + ".jsonl"), "w") as f:
+        f.write("\n".join(out) + "\n")
+    return len(out)
+
+
+repo_root = os.path.join(root, "fixture_repos")
+
+# (a) a non-git workspace folder containing two independent nested repos
+workspace = os.path.join(repo_root, "workspace")
+service_a = os.path.join(workspace, "service-a")
+service_b = os.path.join(workspace, "service-b")
+make_git_marker(service_a)
+make_git_marker(service_b)
+
+# (b) one repo, cwd varies across sub-packages -> must collapse to one bucket
+monorepo = os.path.join(repo_root, "monorepo")
+frontend = os.path.join(monorepo, "frontend")
+backend = os.path.join(monorepo, "backend")
+make_git_marker(monorepo)
+os.makedirs(frontend, exist_ok=True)
+os.makedirs(backend, exist_ok=True)
+
+# (c) cwd pointing at a directory that doesn't exist on this machine
+deleted_cwd = os.path.join(repo_root, "deleted-repo", "src")
+
+s3_entries = [
+    (workspace, "main", "u", "Look at both services and the monorepo packages."),
+    (service_a, "main", "a", ([tu("w1", "Read", {"file_path": os.path.join(service_a, "main.py")})],
+                              usage(), "claude-sonnet-4-6")),
+    (service_a, "main", "u", [tr("w1", "print('a')")]),
+    # nested subpath of service-a must still resolve to the service-a root
+    (os.path.join(service_a, "src", "utils"), "main", "a",
+     ([{"type": "text", "text": "Refactored a util in service-a."}], usage(), "claude-sonnet-4-6")),
+    (service_b, "develop", "a", ([tu("w2", "Read", {"file_path": os.path.join(service_b, "main.py")})],
+                                 usage(), "claude-sonnet-4-6")),
+    (service_b, "develop", "u", [tr("w2", "print('b')")]),
+    (frontend, "main", "a", ([tu("w3", "Bash", {"command": "git commit -am 'update frontend'"})],
+                             usage(), "claude-sonnet-4-6")),
+    (frontend, "main", "u", [tr("w3", "[main abc1234] update frontend")]),
+    (backend, "main", "a", ([{"type": "text", "text": "Backend change looks good."}],
+                            usage(), "claude-sonnet-4-6")),
+    (deleted_cwd, "main", "a", ([{"type": "text", "text": "Working in a repo removed since this ran."}],
+                                usage(), "claude-sonnet-4-6")),
+]
+n3 = build_multi_cwd("22222222-3333-4444-5555-666666666666", s3_entries)
+
+print(f"wrote {n1}+{n2}+{n3} lines into {proj}")
+print(f"git-root fixtures under {repo_root}: "
+      f"workspace/{{service-a,service-b}} (independent repos), "
+      f"monorepo/{{frontend,backend}} (one repo), "
+      f"deleted-repo/src (never created — exercises the fallback path)")
