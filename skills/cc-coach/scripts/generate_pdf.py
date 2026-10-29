@@ -40,6 +40,57 @@ C_MUTED     = colors.HexColor("#666666")   # sub-text / footer
 C_ROW_ALT   = colors.HexColor("#f4f6fb")   # alternating table rows
 C_BORDER    = colors.HexColor("#c8d0e0")   # table borders
 C_HR        = colors.HexColor("#d0d5e0")   # horizontal rule
+C_TREND_UP   = "#1a7f37"                   # history-feature trend indicators
+C_TREND_DOWN = "#cf222e"
+C_TREND_FLAT = "#57606a"
+
+
+# ── Trend glyphs (history feature) ────────────────────────────────────────────
+# analyze.py's trend rendering uses ▲/▼/± and a Unicode block sparkline
+# (▁▂▃▄▅▆▇█), plus a colored-circle emoji on the headline. The standard PDF
+# fonts (Helvetica's WinAnsiEncoding) have no glyphs for any of these, so the
+# latin-1 strip below would silently swallow them — leaving a stray leading
+# space where a trend arrow used to be instead of an error, which is worse:
+# it looks like a formatting bug rather than a missing feature. Protect them
+# here as plain-ASCII placeholders (surviving both the latin-1 strip and the
+# XML-escape step), then expand them into real colored reportlab markup
+# afterward, so the PDF shows actual color instead of nothing.
+_TREND_UP_RE   = re.compile(r"(?:\U0001F7E2\s*)?▲\s*(\+?\d+(?:\.\d+)?)")   # (🟢)? ▲ N
+_TREND_DOWN_RE = re.compile(r"(?:\U0001F534\s*)?▼\s*(-?\d+(?:\.\d+)?)")   # (🔴)? ▼ N
+_TREND_FLAT_RE = re.compile(r"(?:⚪\s*)?±\s*(\d+(?:\.\d+)?)")         # (⚪)? ± N
+_SPARK_UNICODE = "▁▂▃▄▅▆▇█"  # ▁▂▃▄▅▆▇█
+_SPARK_ASCII   = ".,-:=+*#"
+_SPARK_RE      = re.compile(f"[{_SPARK_UNICODE}]{{2,}}")
+
+
+def _protect_trend_glyphs(text: str) -> str:
+    text = _TREND_UP_RE.sub(lambda m: f"\x01U{m.group(1)}\x01", text)
+    text = _TREND_DOWN_RE.sub(lambda m: f"\x01D{m.group(1)}\x01", text)
+    text = _TREND_FLAT_RE.sub(lambda m: f"\x01F{m.group(1)}\x01", text)
+    text = _SPARK_RE.sub(
+        lambda m: "\x01S" + "".join(
+            _SPARK_ASCII[_SPARK_UNICODE.index(c)] for c in m.group(0)
+        ) + "\x01",
+        text)
+    return text
+
+
+_TREND_PLACEHOLDER_RE = re.compile(
+    r"\x01([UDF])(\+?-?\d+(?:\.\d+)?)\x01|\x01S([^\x01]*)\x01"
+)
+
+
+def _expand_trend_glyphs(text: str) -> str:
+    def repl(m):
+        kind = m.group(1)
+        if kind == "U":
+            return f"<font color='{C_TREND_UP}'><b>UP {m.group(2)}</b></font>"
+        if kind == "D":
+            return f"<font color='{C_TREND_DOWN}'><b>DOWN {m.group(2)}</b></font>"
+        if kind == "F":
+            return f"<font color='{C_TREND_FLAT}'>FLAT {m.group(2)}</font>"
+        return f"<font color='{C_TREND_FLAT}'>{m.group(3)}</font>"  # sparkline
+    return _TREND_PLACEHOLDER_RE.sub(repl, text)
 
 
 def _make_styles():
@@ -84,10 +135,17 @@ def _make_styles():
 
 def _inline(text: str, style) -> Paragraph:
     """Convert inline **bold**, *italic*, and `code` to reportlab markup."""
+    # Protect our own trend glyphs (arrows, flat ±, sparkline blocks) before
+    # the latin-1 strip below would otherwise silently delete them.
+    text = _protect_trend_glyphs(text)
     # Strip characters outside Latin-1 range — WinAnsiEncoding can't encode them
     text = text.encode("latin-1", errors="ignore").decode("latin-1")
     # Escape XML special chars first (but not our own tags)
     text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    # Expand the protected trend-glyph placeholders into real markup now that
+    # escaping is done, so OUR <font>/<b> tags survive as real XML rather
+    # than being escaped into literal text.
+    text = _expand_trend_glyphs(text)
     # Bold: **...**
     text = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text)
     # Italic: *...*

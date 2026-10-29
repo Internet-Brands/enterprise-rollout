@@ -1,19 +1,13 @@
 ---
 name: claude-code-token-coach
 description: >
-  Audit a developer's own Claude Code session history, grade how well they
-  follow token-optimization best practices, and — when they are requesting a
-  budget/cap increase — assemble a budget-request packet for the IT HelpDesk.
-  Use this skill whenever the user wants to review, audit, improve, or
-  understand their Claude Code token/context/cost usage ("how am I doing on
-  tokens", "review my Claude Code usage", "am I using the cache well", "why is
-  my context filling up"), AND whenever a developer needs to request more Claude
-  Code budget or a higher spend cap ("request a budget increase", "I hit my
-  Claude Code cap", "justify my Claude Code spend to IT", "raise my limit").
-  Produces a coaching report for the developer and, on request, an IT/HelpDesk
-  budget packet plus a repo check-in audit. Trigger even if the user doesn't say
-  the word "skill". " Run cc-coach skill" or "run claude coach skill" or
-  "check my claude usage" or "how much have I spent on claude"
+  Audit a developer's own Claude Code session history, check model and effort
+  fit for their work, and grade token, context and cost habits. Use for requests
+  to review Claude Code usage, cache efficiency, context growth or spend
+  (including "run cc-coach" and "check my claude usage"), and to justify a
+  budget or spend-cap increase. Produces local coaching and IT reports plus
+  an optional HelpDesk budget packet with a repo check-in audit. Report
+  submission is manual; billing and commit lookups send the configured email.
 ---
 
 # Claude Code Token Coach
@@ -21,9 +15,9 @@ description: >
 This skill does two related jobs from one analysis of a developer's **own past
 Claude Code sessions**:
 
-1. **Coaching** — grades how well the developer follows token-optimization best
-   practices and returns actionable, per-practice feedback (the original
-   token-optimizer behavior).
+1. **Coaching** — checks model and effort fit for the work, aiming for the best
+   successful result per dollar across intelligence, performance and price.
+   Retains the deterministic habit scorecard and adds unscored fit guidance.
 2. **Budget requests** — when the developer is asking for a higher spend cap, it
    assembles a one-page **budget-request packet** for the IT HelpDesk: spend,
    the efficiency scorecard, a **repo check-in audit** (which repos the budget
@@ -31,9 +25,10 @@ Claude Code sessions**:
    commitments, ending in an Approve / Approve-with-conditions / Coach-first
    recommendation.
 
-The point is not to scold about raw token counts — counts depend on task size.
-It surfaces *habits* that waste tokens regardless of task, and gives IT a
-defensible, deterministic basis for a cap decision.
+Optimize for successful results per dollar, with acceptable quality and latency.
+Token counts alone cannot establish value. The existing habit scorecard remains
+the deterministic input to cap decisions; model/effort fit is separate coaching,
+not a new approval criterion.
 
 ## When to use
 
@@ -73,7 +68,7 @@ Key fields the analyzer relies on (all confirmed present):
   exist locally), it falls back to the basename of `cwd`, same as before.
 - `system` entries mark compaction boundaries.
 
-This local source is always available and stays on the developer's machine.
+When present, transcripts are read locally and are not uploaded by the analyzer.
 
 **Authoritative spend** is fetched automatically: `analyze.py` calls the Athena
 cc-coach spend API (`analyze.py:SPEND_API_BASE` — the athenaupdater-api proxy
@@ -84,6 +79,16 @@ reports fall back to the transcript estimate and say so explicitly — the
 estimate is a relative signal, not a billing number.
 
 ## Workflow
+
+### Step 0 — Check fit before model advice
+
+Read [references/model-fit.md](references/model-fit.md) for the workload table
+and evidence rules. Use the analyzer's `model_fit` workload hints and the user's
+stated work to identify task type, complexity, quality needs and latency needs.
+These hints are provisional: a short answer or missing thinking block does not
+prove a task was easy. If evidence is insufficient, say fit is unknown and keep
+advice conditional; ask about the work only if needed for a specific recommendation.
+Do not default every developer to Sonnet or reward lower token counts alone.
 
 ### Step 1 — Analyze (always)
 
@@ -119,7 +124,7 @@ All arguments are forwarded to `analyze.py` unchanged. If `python3` is not on
 If `reportlab` is missing, PDF is skipped gracefully — the `.md` files and JSON
 are still produced.
 
-**Every run writes exactly four report files** to the working directory (or
+**Every run attempts to write four report files** to the working directory (or
 `--out-dir` if given), and prints each path to stderr:
 
 | File | Audience | Contents |
@@ -132,6 +137,18 @@ are still produced.
 There is **no** `report.md` or `report.pdf` — those names are obsolete. The four
 files above are the only reports. Do not invent or link any other filename.
 
+Each run also updates `history.json` at a **fixed per-user location**,
+`~/.cc-coach/history.json` — **not** alongside the four reports, and not
+affected by `--out-dir` or the current working directory — capped at the most
+recent 12 runs, so the *next* run can show a score trend. The fixed location
+is deliberate: the skill is distributed as several separate copies (plugin
+cache, a checked-out repo, `~/.claude/skills/`) and can be invoked from any
+working directory, and the whole point of a trend is one continuous history
+regardless of which copy or directory a given run happens from — a
+per-directory default would silently fragment it. It is bookkeeping, not a
+report — never list it in step 2a, never paste it, and never attach it to a
+HelpDesk ticket.
+
 ### Step 2 — Present the reports (always)
 
 After the script completes, do the following in order. Use the **exact** paths
@@ -140,7 +157,7 @@ the script printed to stderr (`User report → …`, `IT report → …`,
 
 **2a — Notify the user of all four generated files.**
 List every file that was written, linked as markdown so the user can click to
-open them. Always list all four — both the developer report and the IT report:
+open them. List all four when generated — both the developer report and the IT report:
 
 > Reports saved:
 > - [User.md](User.md) — your full coaching report
@@ -151,24 +168,15 @@ open them. Always list all four — both the developer report and the IT report:
 If a PDF is missing because `reportlab` is not installed, say so and link only
 the `.md` files — never link a file the script did not write.
 
-**2b — Paste the full developer report (`User.md`) verbatim.**
-Do NOT summarize, condense, or reformat. Paste the entire contents of `User.md`
-into the response so the user sees every section:
-- Token totals table (Fresh input / Cache creation / Cache read / Output)
-- Estimated cost & model mix table
-- **Repos worked in table** (with GL Commits, AI Commits, Turns, Est. cost columns)
-- Scorecard table
-- Per-practice findings with worst offenders
-- Agent behavior observations
-- Top priority
-
-Omitting any table or section — especially the Repos / AI commits table — is a
-bug. The repo table is the primary evidence for the budget case and must always
-be shown in full.
-
-Do **not** paste `IT.md` into the chat by default — it is the manager-facing
-artifact, delivered as a file. Just point the user to it via the link in 2a and
-the send instruction in 2c.
+**2b — Give a short coaching summary in chat.**
+Show the grade and trend if available, authoritative spend with its billing
+period (or a clearly labeled transcript estimate), the workload fit finding,
+and at most three actions. Prioritize known older-version spend, then model and
+effort fit, and read cache/context together. Unknown task type or effort must
+stay unknown. A strong cache grade is not evidence of overall efficiency when
+context is oversized or auto-compacting. Link the full report for token, model,
+repo and practice tables; paste the full report only if the developer requests it.
+Do not paste `IT.md` by default.
 
 **2c — Surface the ready-to-attach IT report (always close with this).**
 `IT.pdf` is already generated — it IS the document IT needs to approve a cap
@@ -184,8 +192,8 @@ either/or question):
 
 Hard rules for the closing message:
 - **Never** ask "Want me to assemble the IT budget-request packet, or paste the
-  full coaching report?" — you always paste the coaching report (2b) **and**
-  always surface this `IT.pdf` instruction. Both happen; it is not a choice.
+  full coaching report?" — provide the brief summary (2b) and surface the
+  `IT.pdf` instruction; the complete reports are already saved.
 - The action is **open a HelpDesk ticket and attach `IT.pdf`** — do **not** tell
   the user to email it. Mention `IT.pdf` by its exact filename and link it.
 - The richer `budget-request-packet.md` (Steps 3–4) is **optional/advanced** —
@@ -237,7 +245,7 @@ change, `--no-log` to skip). Each entry holds the spend figures, spend source
 
 ### Step 5 — Submission is manual, by the developer
 
-**The skill never sends anything.** It only generates the reports; routing them
+**The skill never submits reports.** It only generates the reports; routing them
 to the HelpDesk is a manual step the developer performs themselves:
 
 - For a standard cap increase: the developer opens a ticket with the IT
@@ -271,9 +279,12 @@ run **through Claude Code only**. Commits made outside Claude Code won't appear.
 For authoritative check-in history, GitHub/GitLab is the source of truth and can
 be layered in later.
 
-**Not trackable from transcripts:** whether a task was framed well, or whether a
-*specific* Opus turn truly needed Opus (model-efficiency is a deliberately
-conservative heuristic — present as "consider", not a verdict).
+**Limited evidence:** prompt text can suggest workload type, but transcripts
+cannot prove task difficulty, success, rework, or result per dollar. Effort is
+reported only when explicitly logged; never infer it from answer length or
+thinking blocks. The existing model-efficiency score is a structural heuristic,
+not proof a particular turn needed a different model. Model-version and effort
+advice in `model_fit` is unscored and must not alter cap recommendations.
 
 See `references/best-practices.md` for the full catalog, each metric definition,
 the thresholds, and the weighting. Read it before customizing thresholds or
@@ -284,15 +295,29 @@ explaining the methodology.
 Each scored practice gets 0–100 and a letter (A ≥ 90, B ≥ 80, C ≥ 70, D ≥ 60,
 F < 60); the overall grade is the weighted average of scored practices only.
 Observations never affect the grade. Weights live in `analyze.py:WEIGHTS`,
-thresholds in `analyze.py:THRESHOLDS`, prices in `analyze.py:PRICING` — all meant
+thresholds in `analyze.py:THRESHOLDS`, version prices in `model_fit.py:RATES` (unknown-version fallbacks in
+`analyze.py:PRICING`) — all meant
 to be tuned per team. The packet's recommendation is derived from the overall
 grade tempered by the size of the requested increase (`build_packet.py:recommend`).
 
+The trend line in `User.md`/`report.json` compares raw scores across runs via
+`history.json`. A change to `WEIGHTS`/`THRESHOLDS`/a scoring formula changes
+what a given score *means* — e.g. the 2026-07 removal of `tool_error_rate`
+from scoring (see the `WEIGHTS` comment in `analyze.py`) shifted every
+practice's weight. A trend delta spanning such a change reflects the
+methodology change, not the developer's habits; see
+`references/best-practices.md` for the full caveat.
+
 ## Governance & privacy
 
-- **The skill only generates reports — it never submits them.** The developer
+- **Network disclosure:** on each normal run, the analyzer sends the configured
+  developer email and billing month/year to the Athena spend API and the
+  AI-commits API (possibly querying the prior month too). The background spend
+  hook also sends email when its scheduled check runs. Source code, prompts and
+  transcripts are not uploaded. Report generation and parsing are local.
+- **The skill never submits reports.** The developer
   reviews the output and attaches `IT.pdf` (or the packet) to a HelpDesk
-  ticket themselves. There is no automated sending of any kind.
+  ticket themselves. Reports are not submitted automatically; the API lookups above still occur.
 - **Transparency over monitoring** — the developer sees everything that will
   reach IT before they submit it. The repo audit carries repo names, branches,
   and counts only — **never code contents**.
@@ -310,6 +335,13 @@ grade tempered by the size of the requested increase (`build_packet.py:recommend
   their HelpDesk ticket (optional, budget requests).
 - `log.json` — append-only audit log of packet generation. Metrics + packet
   hash only; no code or secrets.
+- `history.json` — run-history (scores only, capped at the most recent N
+  runs, default 12) powering the trend line (always, unless `--no-history`),
+  at the fixed per-user path `~/.cc-coach/history.json` regardless of
+  `--out-dir`/cwd/which copy of the skill ran. Same privacy guarantee as the
+  reports: no code, prompts, paths, or session IDs. `--no-history` skips it
+  entirely; `--history-limit` changes the cap; `--history-out` overrides the
+  path for a single run (e.g. testing) without touching the real history.
 
 All outputs stay on the developer's machine — submission to the HelpDesk is
 always a manual step by the developer (see step 5).
@@ -318,4 +350,10 @@ always a manual step by the developer (see step 5).
 
 `scripts/make_fixture.py <dir>` writes synthetic two-repo sessions with git
 check-ins so you can exercise both the coaching and budget paths without real
-transcripts. See `samples/` for example outputs.
+transcripts. See `samples/` for historical example outputs.
+
+Run the offline model-fit regression checks from the skill directory:
+`python3 -m unittest discover -s scripts -p 'test_*.py'`.
+They cover version prices, the Haiku prompt-size boundary, unknown effort,
+subagent aggregation, unscored fit findings and concise output with full reports.
+No live billing or commit API calls are made by these tests.

@@ -34,6 +34,7 @@ import re
 import sys
 from collections import defaultdict, Counter
 from datetime import datetime, timezone, timedelta
+import model_fit
 
 # ----------------------------------------------------------------------------
 # Tunable thresholds (single source of truth for the rubric).
@@ -52,10 +53,11 @@ THRESHOLDS = {
                                       # is "likely could have run on a cheaper model"
 }
 
-# Per-million-token prices (USD), by model tier. CHECK/EDIT THESE — they change.
+# Fallback per-million-token prices (USD) for unknown/alias model versions.
+# Exact version rates live in model_fit.RATES; keep these historical fallbacks.
 # As of May 2026: Opus 4.7/4.8 = 5/25, Sonnet 4.6 = 3/15, Haiku 4.5 = 1/5,
 # Fable 5 = 10/50 (2× Opus). Cache read = 10% of input; cache write = 125% of input.
-# NOTE: legacy Opus 4 / 4.1 are 15/75 — bump the opus row if you used those.
+# Known legacy Opus 4 / 4.1 rates (15/75) are handled in model_fit.RATES.
 PRICING = {
     "fable":  {"in": 10.0, "out": 50.0},
     "opus":   {"in": 5.0,  "out": 25.0},
@@ -79,7 +81,11 @@ def model_tier(model):
 
 
 def turn_cost(usage, tier):
-    """USD cost of one assistant turn given its model tier."""
+    """Version-aware API estimate, falling back to historical tier rates."""
+    prices = model_fit.rates(tier, usage)
+    if prices:
+        return model_fit.cost_at_rates(usage, prices)
+    tier = tier if tier in PRICING else model_tier(tier)
     p = PRICING.get(tier, PRICING["other"])
     inp = usage.get("input_tokens", 0) or 0
     out = usage.get("output_tokens", 0) or 0
@@ -285,6 +291,10 @@ class Stats:
         self.subagent_cost_total = 0.0
 
         self.models = Counter()
+        self.fit_counts = Counter()
+        self.cost_by_model = defaultdict(float)
+        self.legacy_models = {}
+        self.unpriced_turns = 0
         self.first_ts = None
         self.last_ts = None
 
@@ -393,6 +403,7 @@ def analyze_files(files):
         s.sessions += 1
         session_input = 0
         current_repo = "(unknown)"
+        current_task = "unknown"
         _session_compaction_count = 0
         # track Read paths and edits to detect redundant reads
         read_paths = set()
@@ -513,7 +524,8 @@ def analyze_files(files):
 
                 # cost + model efficiency
                 tier = model_tier(model)
-                cost = turn_cost(usage, tier)
+                cost = turn_cost(usage, model)
+                model_fit.record(s, entry, current_task, cost)
                 s.cost_total += cost
                 s.cost_by_tier[tier] += cost
                 R = s.repos[current_repo]
@@ -532,7 +544,7 @@ def analyze_files(files):
                               and out_tok < THRESHOLDS["simple_turn_output_tokens"])
                     if simple:
                         s.opus_simple_turns += 1
-                        s.opus_simple_savings += cost - turn_cost(usage, "sonnet")
+                        s.opus_simple_savings += max(0, cost - turn_cost(usage, "claude-sonnet-5-5"))
                 continue
 
             if etype == "user":
@@ -572,6 +584,7 @@ def analyze_files(files):
                                 s.large_read_files.append((meta.get("path", "?"), size))
                 if not is_tool_return:
                     s.user_turns += 1
+                    current_task = model_fit.task_kind(content)
                 continue
 
         if session_input > s.max_session_input:
@@ -636,7 +649,8 @@ def fold_subagent_tokens(subagent_files, s):
             s.subagent_cache_read += cr
 
             tier = model_tier(model)
-            cost = turn_cost(usage, tier)
+            cost = turn_cost(usage, model)
+            model_fit.record(s, entry, "unknown", cost)
             s.cost_total += cost
             s.subagent_cost_total += cost
             s.cost_by_tier[tier] += cost
@@ -830,14 +844,14 @@ def score_practices(s):
     # thinking, and a short answer probably didn't need Opus.
     simple_ratio = pct(s.opus_simple_turns, s.opus_turns) if s.opus_turns else 0.0
     if s.opus_turns == 0:
-        me_score = 100  # no premium-model spend to optimize
-        me_metric = "no Opus turns — already economical"
+        me_score = 100  # no Opus candidates under the unchanged structural rubric
+        me_metric = "no Opus turns — no candidates under this heuristic"
     else:
         # Penalty: each 1% trivial-Opus share costs 1 point (100 trivial = 0).
         # Old formula used ×1000 which zeroed the score at 0.1% trivial — far too harsh.
         me_score = max(0, 100 - simple_ratio * 100)
-        me_metric = (f"{s.opus_simple_turns}/{s.opus_turns} Opus turns looked trivial "
-                     f"(~${s.opus_simple_savings:.2f} saveable)")
+        me_metric = (f"{s.opus_simple_turns}/{s.opus_turns} Opus turns flagged for review "
+                     f"(~${s.opus_simple_savings:.2f} same-token scenario)")
     P["model_efficiency"] = {
         "metric": me_metric,
         "value": simple_ratio,
@@ -846,8 +860,8 @@ def score_practices(s):
                   + ", ".join(f"{t}:{n}turns/${s.cost_by_tier[t]:.2f}"
                               for t, n in s.turns_by_tier.most_common())
                   if s.turns_by_tier else f"est. cost ${s.cost_total:.2f}",
-        "advice": "Start tasks in Sonnet and escalate to Opus only for genuinely "
-                  "hard reasoning/refactoring; use Haiku for trivial edits.",
+        "advice": "Check the work and outcome against the model/effort fit assessment. "
+                  "Short answers alone do not show that a smaller model would succeed.",
     }
 
     # Attach concrete offenders + a quantified, do-this-next action per practice.
@@ -890,11 +904,11 @@ def score_practices(s):
 
     if s.opus_turns and s.opus_simple_turns:
         P["model_efficiency"]["action"] = (
-            f"{s.opus_simple_turns} of your {s.opus_turns} Opus turns were trivial "
-            f"(no tools, no thinking, short answer) — ~${s.opus_simple_savings:.2f} "
-            f"of the ${s.cost_by_tier.get('opus', 0):.2f} Opus spend. Use `/model "
-            f"sonnet` for routine work and switch to Opus only when you hit genuinely "
-            f"hard reasoning; Haiku for trivial edits.")
+            f"Review {s.opus_simple_turns}/{s.opus_turns} short Opus turns without "
+            f"tools or visible thinking. The ~${s.opus_simple_savings:.2f} comparison "
+            "uses identical tokens at Sonnet 5.5 list rates, not measured task savings. "
+            "Confirm task difficulty and outcomes first; consider lower effort on "
+            "the current model before comparing a smaller model.")
 
     if s.heaviest_session and s.max_session_input > THRESHOLDS["big_session_tokens"]:
         sid, tok = s.heaviest_session
@@ -927,6 +941,213 @@ def overall(P):
 
 
 # ----------------------------------------------------------------------------
+# History / trend tracking (history.json)
+# ----------------------------------------------------------------------------
+# A small local run-history so each report can show a trend vs. the last run.
+# Entries hold scores only (timestamp, period, overall score/grade, per-scored-
+# practice score) — never code, prompts, file paths, or session-identifying
+# detail. Stored as a JSON array (load-modify-write), same pattern as
+# audit.py's log.json, capped to the most recent N entries on every write.
+#
+# NOTE: a change to WEIGHTS/THRESHOLDS/a scoring formula (e.g. the 2026-07
+# tool_error_rate removal above) changes what a given score means. There is
+# no automatic way to detect that from stored scores alone, so a trend delta
+# spanning such a change will look like a habit change when it is really a
+# methodology change — see references/best-practices.md for the caveat this
+# must carry in the docs.
+#
+# Fixed per-user default location (see main()'s --history-out wiring for why
+# this must NOT default to cwd/--out-dir): one history, no matter which repo
+# directory or which copy of the skill (plugin cache, a checked-out repo,
+# ~/.claude/skills) a run happens from.
+DEFAULT_HISTORY_PATH = os.path.expanduser("~/.cc-coach/history.json")
+
+
+def load_history_entries(path):
+    """Load history.json as a list of entries. A missing file is the normal
+    first-run case and returns [] silently. Invalid JSON, or valid JSON that
+    isn't a list, logs one warning to stderr and returns [] — the caller then
+    overwrites the file with a fresh single-entry array rather than crashing."""
+    if not os.path.exists(path):
+        return []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError) as e:
+        print(f"Warning: could not read history file {path} ({e}) — "
+              f"treating as no prior history.", file=sys.stderr)
+        return []
+    if not isinstance(data, list):
+        print(f"Warning: {path} did not contain a JSON array — "
+              f"treating as no prior history.", file=sys.stderr)
+        return []
+    return data
+
+
+def write_history_entries(path, entries, limit):
+    """Load-modify-write a JSON array, pruned to the most recent `limit`
+    entries (oldest pruned first)."""
+    if limit and limit > 0:
+        entries = entries[-limit:]
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(entries, f, indent=2)
+
+
+def build_history_entry(s, ov_score, ov_letter, P, period_days, now=None):
+    """One history.json entry for this run. practices covers only the five
+    SCORED practices (WEIGHTS keys) — observations are never persisted here."""
+    now = now or datetime.now(timezone.utc)
+    return {
+        "timestamp": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "period": {
+            "days": period_days,
+            "start": s.first_ts.date().isoformat() if s.first_ts else None,
+            "end": s.last_ts.date().isoformat() if s.last_ts else None,
+        },
+        "overall_score": round(ov_score, 1),
+        "overall_grade": ov_letter,
+        "practices": {k: round(P[k]["score"]) for k in WEIGHTS if k in P},
+    }
+
+
+def format_trend_delta(delta, emoji=False):
+    """Numeric delta -> a trend fragment. None -> ''.
+
+    Flat uses '±' rather than a bare dash — a dash is already used all over
+    the report's prose, so a dedicated, unambiguous glyph lets the PDF
+    generator recolor *just* the trend indicator without also recoloring
+    unrelated text (see generate_pdf.py's _protect_trend_glyphs()).
+
+    `emoji=True` adds a colored-circle prefix for the single overall-grade
+    headline; per-practice lines and inline mentions default to the bare
+    arrow so five repeated circles down the scorecard don't turn into noise.
+    """
+    if delta is None:
+        return ""
+    if delta > 0:
+        return f"🟢 ▲ +{delta:g}" if emoji else f"▲ +{delta:g}"
+    if delta < 0:
+        return f"🔴 ▼ {delta:g}" if emoji else f"▼ {delta:g}"
+    return "⚪ ± 0" if emoji else "± 0"
+
+
+_STREAK_MIN_LEN = 3          # consecutive same-direction runs before it's worth a callout
+_MOVER_MIN_DELTA = 3         # ignore practice deltas smaller than this as noise
+_SPARK_CHARS = "▁▂▃▄▅▆▇█"    # Markdown-only — outside Latin-1, dropped from the PDF
+
+
+def compute_streak(scores, min_len=_STREAK_MIN_LEN):
+    """scores: chronological overall_score values, oldest -> newest, with the
+    current run as the last element. Returns {"direction", "length"} for a
+    run of >= min_len consecutive same-direction moves ending at the current
+    run, or None (too short a history, or the latest move isn't part of a
+    streak of that length)."""
+    if len(scores) < min_len + 1:
+        return None
+    diffs = [scores[i] - scores[i - 1] for i in range(1, len(scores))]
+    last_dir = 1 if diffs[-1] > 0 else (-1 if diffs[-1] < 0 else 0)
+    if last_dir == 0:
+        return None
+    length = 0
+    for d in reversed(diffs):
+        dir_ = 1 if d > 0 else (-1 if d < 0 else 0)
+        if dir_ != last_dir:
+            break
+        length += 1
+    if length < min_len:
+        return None
+    return {"direction": "improving" if last_dir > 0 else "declining", "length": length}
+
+
+def find_biggest_mover(deltas, min_delta=_MOVER_MIN_DELTA):
+    """Among the per-practice deltas (key -> Optional[number], excluding
+    "overall"), return (key, delta) for the largest-magnitude one, or None
+    if nothing clears `min_delta` (i.e. this run didn't have a clear driver)."""
+    candidates = [(k, v) for k, v in deltas.items() if k != "overall" and v]
+    if not candidates:
+        return None
+    key, val = max(candidates, key=lambda kv: abs(kv[1]))
+    if abs(val) < min_delta:
+        return None
+    return key, val
+
+
+def sparkline(scores, width=8):
+    """A compact Unicode block-bar rendering of the last `width` overall
+    scores (oldest -> newest). '' if there isn't enough history to draw one."""
+    pts = scores[-width:]
+    if len(pts) < 2:
+        return ""
+    lo, hi = min(pts), max(pts)
+    span = (hi - lo) or 1
+    return "".join(_SPARK_CHARS[min(7, int((p - lo) / span * 7))] for p in pts)
+
+
+def build_trend(prior_entries, ov_score, P):
+    """Delta of this run's scores vs. the most recent prior history entry,
+    plus insights (streak, biggest mover, sparkline) drawn from the fuller
+    `prior_entries` history, not just the single most recent one.
+
+    Returns None when there is no usable prior entry (first run ever, missing/
+    corrupted history, or a prior entry without a numeric overall_score) — the
+    report must omit the trend line entirely in that case, never show a false
+    zero baseline.
+
+    Every lookup goes through .get()/isinstance checks, so a key present on
+    only one side (an old entry's stale `tool_error_rate` from when it was
+    still scored, or a practice added since) yields None for that key's delta
+    instead of raising KeyError.
+    """
+    prev_entry = prior_entries[-1] if prior_entries else None
+    if not isinstance(prev_entry, dict):
+        return None
+    prev_overall = prev_entry.get("overall_score")
+    if not isinstance(prev_overall, (int, float)):
+        return None
+
+    deltas = {"overall": round(ov_score - prev_overall, 1) + 0.0}  # +0.0 avoids a stray -0.0
+    prev_practices = prev_entry.get("practices") or {}
+    for key in WEIGHTS:
+        cur_val = (P.get(key) or {}).get("score")
+        prev_val = prev_practices.get(key)
+        if isinstance(cur_val, (int, float)) and isinstance(prev_val, (int, float)):
+            deltas[key] = round(cur_val) - round(prev_val)
+        else:
+            deltas[key] = None
+
+    prior_scores = [e.get("overall_score") for e in prior_entries
+                    if isinstance(e, dict) and isinstance(e.get("overall_score"), (int, float))]
+    all_scores = prior_scores + [ov_score]
+    mover = find_biggest_mover(deltas)
+
+    prev_ts = parse_ts(prev_entry.get("timestamp"))
+    return {
+        "previous_timestamp": prev_entry.get("timestamp"),
+        "previous_date": prev_ts.date().isoformat() if prev_ts else None,
+        "previous_overall_score": prev_overall,
+        "previous_grade": prev_entry.get("overall_grade"),
+        "deltas": deltas,
+        "streak": compute_streak(all_scores),
+        "biggest_mover": {"practice": mover[0], "delta": mover[1]} if mover else None,
+        "sparkline": sparkline(all_scores),
+    }
+
+
+def update_history(path, s, ov_score, ov_letter, P, period_days, limit, now=None):
+    """Read prior history, compute the trend against it, append this run's
+    entry, prune to `limit`, write back. Returns the trend (or None — see
+    build_trend)."""
+    prior = load_history_entries(path)
+    trend = build_trend(prior, ov_score, P)
+    new_entry = build_history_entry(s, ov_score, ov_letter, P, period_days, now)
+    write_history_entries(path, prior + [new_entry], limit)
+    return trend
+
+
+# ----------------------------------------------------------------------------
 # Report rendering
 # ----------------------------------------------------------------------------
 def _load_helpdesk_email():
@@ -947,7 +1168,7 @@ def _load_helpdesk_email():
 
 def render_user_md(s, P, ov_score, ov_letter, files, ai_commits_data=None,
                    spend_data=None, overlap_frac=None, prev_spend_data=None,
-                   now=None):
+                   now=None, trend=None):
     L = []
     L.append("# Claude Code Token-Optimization Report\n")
     L.append(f"_Generated {datetime.now().strftime('%Y-%m-%d %H:%M')}_\n")
@@ -962,6 +1183,23 @@ def render_user_md(s, P, ov_score, ov_letter, files, ai_commits_data=None,
              f"{s.assistant_turns} main-thread turns, {s.user_turns} user prompts"
              f"{subagent_note}\n")
     L.append(f"## Overall grade: {ov_letter}  ({ov_score:.0f}/100)\n")
+    if trend and trend["deltas"].get("overall") is not None:
+        line = (f"{format_trend_delta(trend['deltas']['overall'], emoji=True)} "
+                f"vs. last run ({trend.get('previous_date') or '?'})")
+        extras = []
+        streak = trend.get("streak")
+        if streak:
+            icon = "📈" if streak["direction"] == "improving" else "📉"
+            extras.append(f"{icon} {streak['length']}-run {streak['direction']} streak")
+        mover = trend.get("biggest_mover")
+        if mover:
+            mv_name = mover["practice"].replace("_", " ").title()
+            extras.append(f"driven by {mv_name} ({format_trend_delta(mover['delta'])})")
+        if extras:
+            line += "  ·  " + "  ·  ".join(extras)
+        L.append(line + "\n")
+        if trend.get("sparkline"):
+            L.append(f"_Last {len(trend['sparkline'])} runs:_ {trend['sparkline']}\n")
 
     total = s.input_tokens + s.output_tokens + s.cache_creation + s.cache_read
     main_in = s.input_tokens - s.subagent_input_tokens
@@ -1012,13 +1250,15 @@ def render_user_md(s, P, ov_score, ov_letter, files, ai_commits_data=None,
     else:
         L.append(f"Estimated spend: **${s.cost_total:.2f}** "
                  f"(transcript estimate at current API rates — authoritative billing "
-                 f"was unavailable for this run; edit `PRICING` in analyze.py if "
+                 f"was unavailable for this run; review version rates in `model_fit.py` and fallback `PRICING` if "
                  f"you're on a plan or different models).\n")
     if s.turns_by_tier:
         L.append("| Model tier | Turns | Est. cost |\n|---|--:|--:|")
         for t, n in s.turns_by_tier.most_common():
             L.append(f"| {t} | {n} | ${s.cost_by_tier[t]:.2f} |")
         L.append("")
+
+    L.append(model_fit.render(s, THRESHOLDS["big_session_tokens"]))
 
     if s.repos:
         L.append("### Repos worked in (from Claude Code sessions)\n")
@@ -1115,10 +1355,9 @@ def render_user_md(s, P, ov_score, ov_letter, files, ai_commits_data=None,
             f"Manual /compact is shown but never scored."
         ),
         "model_efficiency": (
-            "Whether expensive Opus turns were justified by task complexity, or "
-            "whether simpler turns could have run on Sonnet/Haiku. "
-            "This is a conservative heuristic — flagged turns are candidates "
-            "to review, not a verdict.",
+            "A legacy structural signal: short Opus turns without tools or visible thinking. "
+            "It does not measure task difficulty, success or value per dollar. "
+            "Use the unscored model/effort fit assessment before giving advice.",
             f"Opus turns with no tool use, no thinking, and <"
             f"{THRESHOLDS['simple_turn_output_tokens']} output tokens flagged. "
             f"Score = 100 − (trivial_ratio × 100)."
@@ -1130,8 +1369,13 @@ def render_user_md(s, P, ov_score, ov_letter, files, ai_commits_data=None,
         name = k.replace("_", " ").title()
         grade_icon = {"A": "[A]", "B": "[B]", "C": "[C]", "D": "[D]", "F": "[F]"}.get(p["grade"], "")
         defn, calc = DEFINITIONS.get(k, ("", ""))
+        trend_suffix = ""
+        if trend:
+            pd = trend["deltas"].get(k)
+            if pd is not None:
+                trend_suffix = f", {format_trend_delta(pd)} vs. last run"
         L.append(f"### {grade_icon} {name} — {p['grade']} ({p['score']:.0f}/100, "
-                 f"weight {p['weight']})\n")
+                 f"weight {p['weight']}{trend_suffix})\n")
         L.append(f"**Your result:** {p['metric']}  ")
         L.append(f"**What this measures:** {defn}  ")
         L.append(f"**How it's scored:** {calc}\n")
@@ -1376,6 +1620,29 @@ def fetch_ai_commits(base_url: str, email: str, month: int, year: int) -> dict:
         return {}
 
 
+def merge_ai_commits(cur: dict, prev: dict) -> dict:
+    """Merge two calendar months' ai-commits payloads into one, summing
+    total_commits/ai_commits per repo.
+
+    fetch_ai_commits() is a single-calendar-month query with no awareness of
+    the `--days` analysis window — early in a month, most of a 30-day window
+    falls in the *prior* month, so commits made then are invisible to that
+    one query and repos show "no commit data found" despite real activity.
+    This mirrors the prior-month fallback already used for spend below."""
+    if not prev:
+        return cur
+    if not cur:
+        return prev
+    merged = {}
+    for payload in (cur, prev):
+        for row in (payload.get("by_project") or []):
+            repo = row.get("repo", "")
+            m = merged.setdefault(repo, {"repo": repo, "total_commits": 0, "ai_commits": 0})
+            m["total_commits"] += row.get("total_commits", 0) or 0
+            m["ai_commits"] += row.get("ai_commits", 0) or 0
+    return {"by_project": list(merged.values())}
+
+
 def _is_org_remote(url: str) -> bool:
     for domain in ORG_GITLAB_DOMAINS:
         if domain in url:
@@ -1449,6 +1716,14 @@ def main():
     ap.add_argument("--out-dir", default="",
                     help="directory to write User.md, User.pdf, IT.md, IT.pdf "
                          "(defaults to current directory)")
+    ap.add_argument("--history-out", default="",
+                    help="history.json path (default: a fixed per-user location, "
+                         "~/.cc-coach/history.json — NOT --out-dir — so every run "
+                         "shares one trend regardless of where the skill is invoked from)")
+    ap.add_argument("--history-limit", type=int, default=12,
+                    help="max history entries retained; oldest pruned on write (default: 12)")
+    ap.add_argument("--no-history", action="store_true",
+                    help="skip reading and writing history.json entirely")
     args = ap.parse_args()
 
     files, subagent_files = discover(args)
@@ -1462,6 +1737,28 @@ def main():
         fold_subagent_tokens(subagent_files, s)
     P = score_practices(s)
     ov_score, ov_letter = overall(P)
+
+    # Determine output directory.
+    out_dir = os.path.expanduser(args.out_dir) if args.out_dir else os.getcwd()
+    os.makedirs(out_dir, exist_ok=True)
+    now = datetime.now(timezone.utc)
+    effective_days = args.days or 30
+
+    # history.json's default location is a FIXED per-user path, deliberately
+    # NOT tied to --out-dir / the current working directory. The whole point
+    # of a trend is continuity across runs — if the default instead followed
+    # cwd (like the reports do), running the skill from a different repo, or
+    # from a different copy of the skill (plugin cache vs. a checked-out repo
+    # vs. ~/.claude/skills), would each silently start their own disconnected
+    # history. Pass --history-out to point at a specific file instead (e.g.
+    # for a one-off test, so it doesn't mix into the real history).
+    history_path = (os.path.expanduser(args.history_out) if args.history_out
+                    else DEFAULT_HISTORY_PATH)
+    trend = None
+    if not args.no_history:
+        trend = update_history(history_path, s, ov_score, ov_letter, P,
+                               period_days=effective_days,
+                               limit=args.history_limit, now=now)
 
     # Fetch AI commits from helios-metrics API (best-effort; {} on failure)
     _email = None
@@ -1481,12 +1778,32 @@ def main():
                     break
             except Exception:
                 pass
-    now = datetime.now(timezone.utc)
     month = args.month or now.month
     year = args.year or now.year
+
+    # How much of the analysis window the billing/commit month above actually
+    # covers. Both billing and the AI-commits API are single-calendar-month
+    # queries, so early in a month the figure can be accurate yet describe
+    # only a sliver of a multi-week analysis window — fetch the prior month
+    # too (for both) so the report shows the complete picture rather than a
+    # bare, easily-misread $0.00 / "no commit data found".
+    overlap_frac = billing_overlap_fraction(now - timedelta(days=effective_days), now,
+                                            month, year)
+    prev_month, prev_year = (month - 1, year) if month > 1 else (12, year - 1)
+    fetch_prev_month = overlap_frac is not None and overlap_frac < 0.5
+
     ai_commits_data = fetch_ai_commits(
         args.ai_commits_api, _email or "", month, year
     )
+    if fetch_prev_month:
+        prev_ai_commits_data = fetch_ai_commits(
+            args.ai_commits_api, _email or "", prev_month, prev_year
+        )
+        if prev_ai_commits_data:
+            ai_commits_data = merge_ai_commits(ai_commits_data, prev_ai_commits_data)
+            print(f"AI commits: merged in prior month ({prev_month}/{prev_year}) "
+                  f"— analysis window mostly falls outside the current "
+                  f"calendar month.", file=sys.stderr)
 
     # Authoritative spend (billing) — best-effort; {} on failure
     spend_data = fetch_authoritative_spend(_email or "", month, year)
@@ -1497,29 +1814,23 @@ def main():
         print("Authoritative spend unavailable — reports use the transcript "
               "estimate, clearly labelled.", file=sys.stderr)
 
-    # How much of the analysis window the billing month above actually covers.
-    # Billing resets monthly, so early in a month the figure can be accurate
-    # yet describe only a sliver of a multi-week analysis window — fetch the
-    # prior month too so the report can show the complete picture rather than
-    # a bare, easily-misread $0.00.
-    effective_days = args.days or 30
-    overlap_frac = billing_overlap_fraction(now - timedelta(days=effective_days), now,
-                                            month, year)
     prev_spend_data = None
-    if overlap_frac is not None and overlap_frac < 0.5:
-        prev_month, prev_year = (month - 1, year) if month > 1 else (12, year - 1)
+    if fetch_prev_month:
         prev_spend_data = fetch_authoritative_spend(_email or "", prev_month, prev_year)
         if prev_spend_data:
             print(f"Prior-month spend: ${float(prev_spend_data['spend_usd']):.2f} "
                   f"({prev_month}/{prev_year})", file=sys.stderr)
 
     user_md = render_user_md(s, P, ov_score, ov_letter, files, ai_commits_data,
-                             spend_data, overlap_frac, prev_spend_data, now)
+                             spend_data, overlap_frac, prev_spend_data, now,
+                             trend=trend)
     it_md   = render_it_md(s, P, ov_score, ov_letter, files, ai_commits_data,
                            spend_data, overlap_frac, prev_spend_data, now)
     blob = {
         "overall_score": round(ov_score, 1),
         "overall_grade": ov_letter,
+        "trend": trend,
+        "model_fit": model_fit.assessment(s, THRESHOLDS["big_session_tokens"]),
         "sessions": s.sessions,
         "subagent_sessions": s.subagent_sessions,
         "token_totals": {
@@ -1553,6 +1864,7 @@ def main():
         "cost": {
             "estimated_total_usd": round(s.cost_total, 2),
             "by_tier": {t: round(c, 2) for t, c in s.cost_by_tier.items()},
+            "by_model": {m: round(c, 4) for m, c in s.cost_by_model.items()},
             "turns_by_tier": dict(s.turns_by_tier),
             "opus_simple_turns": s.opus_simple_turns,
             "opus_simple_savings_usd": round(s.opus_simple_savings, 2),
@@ -1586,10 +1898,6 @@ def main():
         else:
             print(f"PDF generation failed: {result.stderr.strip()}", file=sys.stderr)
 
-    # Determine output directory
-    out_dir = os.path.expanduser(args.out_dir) if args.out_dir else os.getcwd()
-    os.makedirs(out_dir, exist_ok=True)
-
     user_md_path = os.path.join(out_dir, "User.md")
     it_md_path   = os.path.join(out_dir, "IT.md")
     user_pdf_path = os.path.join(out_dir, "User.pdf")
@@ -1606,7 +1914,13 @@ def main():
     _write_pdf(user_md, user_pdf_path)
     _write_pdf(it_md, it_pdf_path)
 
-    print(user_md)
+    print(f"Grade: {ov_letter} ({ov_score:.0f}/100) · {s.sessions} main sessions · "
+          f"transcript estimate ${s.cost_total:.2f} (not billing).")
+    if spend_data:
+        print(f"Authoritative billing spend: ${float(spend_data['spend_usd']):.2f} "
+              "(see reports for billing period).")
+    print("Review model/effort fit and cache/context together in User.md. "
+          "Full reports saved at the paths above.")
 
 
 if __name__ == "__main__":

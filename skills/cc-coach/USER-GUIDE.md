@@ -2,10 +2,10 @@
 
 A skill that audits **your own** Claude Code usage and does two things:
 
-1. **Coaches you** — grades how efficiently you use tokens/context and tells you exactly what to fix.
+1. **Coaches you** — checks model/effort fit for your work and grades token/context habits, aiming for successful results per dollar.
 2. **Builds your budget request** — when you need a higher spend cap, it generates a one-page packet for the IT HelpDesk (efficiency scorecard, the repos your budget is spent on, your justification, and remediation commitments).
 
-You run it; it reads the session history Claude Code already saved on your machine. **The skill only generates reports — nothing leaves your machine unless you submit it yourself.**
+You run it; it reads the session history Claude Code already saved on your machine. **Transcripts stay local. On each run, the analyzer sends your configured email and billing month/year to the Athena spend and AI-commits APIs. Reports are submitted only by you.**
 
 > **When do I need this?** Per policy, any request to raise your Claude Code spend cap must include a Coach audit. Run the skill, review `IT.pdf`, and attach it to your HelpDesk ticket.
 
@@ -61,11 +61,20 @@ First, try the quick fixes:
   git config --global url."ssh://git@git.internetbrands.com/".insteadOf "https://git.internetbrands.com/"
   git config --global url."ssh://git@gitlab.webmd.com/".insteadOf "https://gitlab.webmd.com/"
   ```
-- **If you clone via HTTPS but are prompted for a password every time** — set up a credential helper so git stores your credentials:
-  ```bash
-  git config --global credential.helper store
-  ```
-  Then authenticate once more; the next clone/pull saves the credentials and stops prompting.
+- **If HTTPS repeatedly asks for credentials** — configure an OS-backed secure
+  credential helper, then authenticate again:
+
+  | OS | Secure helper |
+  |---|---|
+  | macOS | `git config --global credential.helper osxkeychain` |
+  | Windows | Install Git Credential Manager if needed, then `git credential-manager configure` (Windows Credential Manager storage) |
+  | Linux desktop | Configure `git config --global credential.helper libsecret` with Git's `libsecret` helper with an unlocked Secret Service/keyring; your distribution may require installing/building the helper first |
+
+  Check existing configuration with `git config --show-origin --get-all credential.helper`.
+  Replace any existing `store` entry at its reported scope; adding a secure helper
+  does not remove older plaintext copies. Do not paste credentials into chat or
+  config files. Ask IT for the approved helper if your machine has no secure store.
+  See [Git's credential storage guidance](https://git-scm.com/doc/credential-helpers).
 
 After either change, **reload / re-pull the plugin** — relaunch Claude Code, or CLI → `/reload-plugins` (then `/plugin` → **Marketplaces** → **Update** to force a fresh clone); desktop → **Settings → Customize → Plugins → Manage plugins** — and confirm the skill is present (see *Confirm the skill is present* above).
 
@@ -126,9 +135,17 @@ Every run produces **two reports, each in Markdown and PDF**:
 
 > PDFs require the `reportlab` Python package. If it isn't installed, the `.md` files are still produced and the PDF step is skipped with a notice.
 
+Your overall grade line also shows a trend arrow (🟢▲/🔴▼/⚪±) versus your previous run, plus a sparkline of recent scores and callouts like a multi-run streak or which practice moved the most — computed from `history.json` (last 12 runs by default, scores only, no code or session detail). The **first run ever**, or a missing/corrupted `history.json`, simply shows no trend line at all — that's expected, not an error. Pass `--no-history` to skip reading/writing it, or `--history-limit N` to change how many runs are kept.
+
+> **History lives at one fixed location, not next to the reports.** `history.json` is always read from and written to `~/.cc-coach/history.json` — never `--out-dir`, never the current directory. This is deliberate: you can invoke the skill from a project folder, a different repo, or any of its installed copies (managed plugin, a checked-out repo, `~/.claude/skills/`), and every run still contributes to the same one trend. Pass `--history-out <path>` only when you deliberately want to test against an isolated file instead of your real history.
+
+> **A trend jump isn't always a habit change.** If the scoring rules themselves change (weights, thresholds, or what counts as a practice — as happened in 2026-07 when tool-call error rate was removed from the grade), your trend arrow can jump even though your habits didn't. If a swing looks surprising, check whether the skill was updated between the two runs before assuming it's about you.
+
+> **History is local and per-machine.** If you run the skill from two machines (e.g. laptop + desktop), each machine's `~/.cc-coach/history.json` is separate — there's no merging between them, so your trend may look like it "disappeared" when you switch machines. That's expected, not a bug.
+
 ## 6. Submitting to the HelpDesk
 
-The skill **generates the reports only — it never sends anything.** Submission
+The skill **never submits reports.** Submission
 is a manual step you do yourself:
 
 1. Run the skill; it produces `User.md`/`User.pdf` (your coaching report) and
@@ -139,7 +156,7 @@ is a manual step you do yourself:
 3. **Open a ticket with the IT HelpDesk and attach `IT.pdf`**, including your
    current cap, requested cap, and a one-line justification.
 
-Nothing leaves your machine unless you attach and submit it yourself.
+Reports leave your machine only when you attach and submit them. The automatic email-based API lookups still run (see Privacy).
 
 ## 7. Run it manually (optional — no Claude Code session needed)
 
@@ -310,7 +327,7 @@ No Claude Code session history was found at the default location, or your `--day
 | Targeted reads | 20 | Grep then read a slice, not whole files |
 | Output-size discipline | 19 | Filter long command/test output |
 | Context discipline | 17 | `/clear` between unrelated tasks; manual `/compact` is never penalized |
-| Model right-sizing | 16 | Default Sonnet; Opus only for hard work |
+| Model right-sizing | 16 | Review the structural signal alongside task fit; no universal model default |
 
 **Not scored (Claude's own in-the-moment choices)** — native search vs. `cat`/`grep`, redundant re-reads, parallel batching, subagent use, and **tool-call error rate**. These are reported with a suggested CLAUDE.md rule, but **never affect your grade** — you shouldn't be penalized for something you can't control per call. (Tool errors are Claude's failed calls, not yours; user permission denials and environmental failures like VPN/auth issues are excluded from the reported figure too.)
 
@@ -318,17 +335,38 @@ No Claude Code session history was found at the default location, or your `--day
 
 ## 9. Improve your grade fast
 
-The three highest-leverage moves: keep a solid **CLAUDE.md** so Claude stops re-exploring; **`/clear`** between unrelated tasks; **default to Sonnet** and reserve Opus for genuinely hard reasoning. Your report names your single weakest area and the exact fix.
+Keep a focused **CLAUDE.md**, use **`/clear`** between unrelated tasks, and
+choose model **and effort** for the work. Review older-version spend first.
+For routine tasks, compare lower effort on a strong model with a smaller model;
+check quality, latency and retries rather than assuming fewer tokens means better
+value. Read cache and context scores together: a long session may cache well
+while still carrying excessive context.
+
+See [the workload and effort guide](references/model-fit.md) for starting points.
+The analyzer adds workload hints, explicitly logged effort (otherwise unknown),
+older-version spend and same-token price comparisons to `User.md` and
+`report.json`. These checks are unscored. The existing weights, formulas, grade
+thresholds, caps and approval policy are unchanged. Chat shows a brief summary
+and file links; the full report remains available on request.
 
 ## 10. Privacy
 
-Everything is computed locally from your own transcripts. The only data that leaves your machine is the packet you explicitly approve, and it contains efficiency metrics plus repo names/branches/counts — **no source code and no prompt contents.**
+Transcript parsing and scoring run locally. **On each normal analyzer run,
+your configured developer email and billing month/year are sent to the Athena
+spend API and the AI-commits API**, including a prior-month lookup when needed.
+The background spend hook sends your email on its throttled checks too. No
+source code, prompts or transcripts are uploaded by these lookups.
+
+The skill generates reports without submitting them. Review `IT.pdf` before
+attaching it to a HelpDesk ticket yourself. The IT report contains spend,
+repo activity and the verdict; `User.md` and `report.json` include more detailed
+local diagnostics and should be reviewed before sharing.
 
 ## 11. Troubleshooting
 
 - **"No .jsonl transcripts found"** — no Claude Code history at the default path, or you scoped too narrowly. Try `--days 60`, or pass `--project` / `--root`.
 - **`python3: command not found`** — install Python 3 (or try `python`).
-- **Cost numbers look off** — they're estimates at default API rates. If you're on a plan or different models, edit `PRICING` in `scripts/analyze.py`.
+- **Cost numbers look off** — they're estimates at default API rates. If you're on a plan or different models, review version rates in `scripts/model_fit.py` and fallback `PRICING` in `scripts/analyze.py`.
 - **Grade feels unfair** — check the scorecard signals; only the five scored practices count, and the unscored observations are listed separately.
 - **The spend alert never fires (or fires too often)** — it's throttled to twice per day and only warns within $20 of a cap. Confirm `curl` and `jq` are installed and your email is configured; the caps and thresholds are controlled server-side (see 3).
 

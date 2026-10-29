@@ -13,7 +13,8 @@ two tiers, and the distinction matters:
   report suggests the one real lever: a steering rule in CLAUDE.md.
 
 Weights sum to 100 across scored practices and live in `analyze.py:WEIGHTS`.
-Thresholds live in `analyze.py:THRESHOLDS`; prices in `analyze.py:PRICING`.
+Thresholds live in `analyze.py:THRESHOLDS`; version prices in
+`model_fit.py:RATES`, with unknown-version fallbacks in `analyze.py:PRICING`.
 All are meant to be tuned per team.
 
 ## Contents
@@ -32,8 +33,8 @@ reads · 9. Parallel batching · 10. Subagent offloading
 
 ## 1. Cache efficiency — weight 28
 
-**Why.** Prompt caching is the single biggest lever. A cache read costs ~10% of
-a normal input token; a cache write costs ~25% more. If your stable prefix
+**Why.** Prompt caching reduces input cost. Cache-read multipliers vary by
+version; a five-minute cache write costs ~25% more than fresh input. If your stable prefix
 (system prompt, CLAUDE.md, tool defs, earlier turns) stays put, most input
 tokens come back as cheap cache reads. Churning the prefix — swapping MCP
 servers mid-session, editing CLAUDE.md mid-task, frequent restarts — forces
@@ -46,6 +47,11 @@ finish a task before reconfiguring.
 `cache_read / (cache_read + cache_creation + input)`.
 
 **Score.** `min(100, share / 0.90 * 100)` — 90%+ read share earns full marks.
+
+**Interpret jointly.** A long session can score well here while carrying an
+oversized cached prefix on every turn. Read context discipline, peak window and
+auto-compaction alongside cache share. The analyzer adds an unscored joint
+interpretation; neither scoring formula changes.
 
 ## 2. Targeted reads — weight 20
 
@@ -98,31 +104,34 @@ which would grow with session length rather than context size).
 
 ## 5. Model efficiency / right-sizing — weight 16
 
-**Why.** Opus costs 5× Sonnet on input, output, and cache. Running trivial work
-on Opus is pure waste. Model choice is fully user-controlled (`/model`).
+**Why.** Model and effort should fit the work. The objective is successful
+results per dollar across quality, latency and price, not minimum token count.
+See [model-fit.md](model-fit.md) before giving model advice.
 
-**User lever.** Default to Sonnet; escalate to Opus for genuinely hard
-reasoning/refactoring; Haiku for trivial edits.
+**User lever.** Choose a current model and appropriate effort based on workload.
+For routine tasks, compare a stronger model at lower effort with a smaller model.
 
-**Signal.** The `model` field on each assistant turn classifies the tier.
-Per-turn cost is estimated from `message.usage` × `PRICING` (cache-write at
-1.25×, cache-read at 0.10×). A turn is flagged "likely didn't need Opus" if it
-ran on Opus **and** had no tool calls, no extended thinking, and a short answer
-(< `simple_turn_output_tokens`, default 400). Savings = Opus cost − Sonnet cost
-for those turns.
+**Legacy scoring signal (unchanged).** An Opus turn with no tools, no visible
+thinking, and fewer than `simple_turn_output_tokens` (400) output tokens is
+flagged for review. This cannot prove the task was easy; a short answer can
+require difficult reasoning. The candidate price comparison uses Sonnet 5.5
+with identical token usage; it is not measured savings or an automatic switch.
 
-**Why a heuristic, not a verdict.** No ground-truth task difficulty exists in
-the transcript, so this deliberately under-flags: it only marks structurally
-trivial turns and will miss "hard but short" answers. Present as "consider",
-not "you were wrong".
+**Score.** `100 − (flagged/opus_turns) * 100`; no Opus usage → 100 under this
+heuristic. That score does not establish good fit or economical outcomes.
 
-**Score.** `100 − (flagged/opus_turns) * 100`; no Opus usage → 100. The model
-mix and estimated cost are reported regardless.
+**Unscored fit assessment.** `model_fit` in `report.json` and `User.md` includes
+prompt-derived workload hints, explicitly logged effort (otherwise unknown),
+older-version spend, and a cache/context interpretation. No new observations
+change grades or budget verdicts. Task success, rework and end-to-end latency
+are not measured; do not claim a measured result-per-dollar ranking.
 
-**Pricing maintenance.** `PRICING` is the single place to update rates
-(currently Opus 5/25, Sonnet 3/15, Haiku 1/5 per Mtok; legacy Opus 4/4.1 were
-15/75). If the user is on a subscription plan, dollar figures are notional
-API-equivalent cost — still a valid relative signal.
+**Pricing maintenance.** `model_fit.py:RATES` stores version-specific rates,
+`CURRENT` stores maintained tier versions, and `analyze.py:PRICING` provides
+historical tier fallbacks when exact pricing is unknown. Current cache-read
+multipliers and logged cache-write durations are accounted for. Review the
+linked official pricing source in [model-fit.md](model-fit.md) before updating.
+Dollar figures remain notional API-equivalent estimates, not billing.
 
 ---
 
@@ -245,7 +254,51 @@ basename is the display name shown in the tables.
 - Thresholds: `analyze.py:THRESHOLDS`. Raising `large_read_tokens` makes
   targeted-reads more lenient; the `* N` multipliers set how fast a score
   drops to F.
-- Prices: `analyze.py:PRICING`.
+- Prices: `model_fit.py:RATES`; unknown-version fallback: `analyze.py:PRICING`.
+
+---
+
+## History & trend tracking (`history.json`)
+
+Each `analyze.py` run appends one entry — timestamp, analysis period, overall
+score/grade, and the five scored practices' scores — to `history.json`,
+capped at the most recent 12 runs by default (`--history-limit` to change,
+`--no-history` to skip entirely). It is a plain JSON array, written via
+load-modify-write, same pattern as `audit.py`'s `log.json` (append-only in
+spirit, not JSONL) — see `write_history_entries()` in `analyze.py`. It never
+contains code, prompt contents, file paths, or session-identifying detail —
+scores and metadata only, the same privacy bar as `report.json`/`log.json`.
+
+**Location is fixed, not derived from `--out-dir`/cwd.** The default path is
+`DEFAULT_HISTORY_PATH` in `analyze.py` (`~/.cc-coach/history.json`), resolved
+once per run in `main()` and never joined with `out_dir`. This is intentional:
+the reports (`User.md`/`IT.md`/`report.json`) are per-run artifacts and
+correctly follow `--out-dir`/cwd, but `history.json` is meant to be the one
+continuous record across every invocation — regardless of which directory you
+ran from, or which of the skill's several distributed copies (managed plugin
+cache, a checked-out repo, `~/.claude/skills/`) executed it. Defaulting it to
+`out_dir` (as an earlier version of this feature did) silently fragments the
+trend into one disconnected file per directory/copy — exactly the kind of bug
+that looks like "it's not tracking" rather than an obvious error. `--history-out`
+exists precisely to opt out of the shared file for a single, isolated test run.
+
+The next run's trend line is a plain per-key delta against the most recent
+prior entry — see `build_trend()` in `analyze.py`. No prior entry (first run,
+missing file, or a file that failed to parse as a JSON array) yields no trend
+at all, never a false zero baseline. A corrupted `history.json` is logged as a
+warning and overwritten with a fresh single-entry array rather than crashing
+the run.
+
+**Risk: methodology changes look like habit changes.** `history.json` carries
+no ruleset-version field, so a trend delta spanning a change to
+`WEIGHTS`/`THRESHOLDS`/a scoring formula (e.g. the 2026-07 removal of
+`tool_error_rate` from scoring — see the `WEIGHTS` comment above) is
+indistinguishable, from the stored entries alone, from a real change in the
+developer's habits — there is no automatic detector for this. When you change
+the scoring rules, note the date and the change here, the same way the
+`tool_error_rate` removal is already documented, so anyone reading a
+surprising trend swing can check whether it lines up with a methodology
+change before reading it as a behavior signal.
 
 ---
 
@@ -258,7 +311,7 @@ and defensible:
    measure Claude's own choices, not the developer's habits — they inform
    coaching but must not count against a budget request.
 2. **The transcript cost is an estimate.** `analyze.py` computes notional
-   API-equivalent cost from token usage × `PRICING`. For the actual cap decision,
+   API-equivalent cost from token usage × version-specific or fallback prices. For the actual cap decision,
    use authoritative spend from billing or the analytics dashboard
    (`claude.ai/analytics/claude-code` or `platform.claude.com/claude-code`) and
    pass it to `build_packet.py --actual-spend`. The estimate remains a valid
