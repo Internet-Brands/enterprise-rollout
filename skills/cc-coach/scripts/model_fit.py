@@ -79,10 +79,14 @@ def task_kind(content):
 
 def logged_effort(entry):
     msg = entry.get("message") or {}
-    value = ((msg.get("output_config") or {}).get("effort")
-             or (entry.get("output_config") or {}).get("effort")
-             or entry.get("effortLevel") or msg.get("effort"))
-    return value if value in ("low", "medium", "high", "xhigh", "max") else "unknown"
+    # Claude Code logs session effort on the entry, with an optional per-turn
+    # override. Request-shaped exports may instead carry output_config.effort.
+    candidates = (entry.get("perTurnEffort"),
+                  (msg.get("output_config") or {}).get("effort"),
+                  (entry.get("output_config") or {}).get("effort"),
+                  entry.get("effort"), entry.get("effortLevel"), msg.get("effort"))
+    return next((value for value in candidates
+                 if value in ("low", "medium", "high", "xhigh", "max")), "unknown")
 
 
 def record(s, entry, task, cost):

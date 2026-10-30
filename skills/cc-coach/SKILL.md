@@ -119,6 +119,16 @@ Always pass `--days 30` for the standard report — it covers **every project**
 active in the window. (With no scope flags the analyzer also defaults to all
 projects / last 30 days; it must never analyze a subset of projects silently.)
 
+`--days N` filters individual entry timestamps in both main and subagent
+transcripts, including with `--project` or `--session`. It does not use file
+modification dates. Entries outside the rolling UTC window, including future
+entries, do not affect totals, repo activity, model mix or grades. Missing or
+invalid timestamps are excluded and counted in bounded reports; timestamps
+without an offset are interpreted as UTC. Explicit `--project`/`--session`
+without `--days` selects full history, labeled accordingly. The requested
+window and included activity dates are distinct from calendar-month billing.
+
+
 All arguments are forwarded to `analyze.py` unchanged. If `python3` is not on
 `PATH`, the wrapper exits immediately with OS-specific install instructions.
 If `reportlab` is missing, PDF is skipped gracefully — the `.md` files and JSON
@@ -355,5 +365,6 @@ transcripts. See `samples/` for historical example outputs.
 Run the offline model-fit regression checks from the skill directory:
 `python3 -m unittest discover -s scripts -p 'test_*.py'`.
 They cover version prices, the Haiku prompt-size boundary, unknown effort,
-subagent aggregation, unscored fit findings and concise output with full reports.
+subagent aggregation, unscored fit findings and concise output with full reports. Timestamp-window tests also cover old
+turns in active sessions, subagents, restored files, boundaries and scoped runs.
 No live billing or commit API calls are made by these tests.

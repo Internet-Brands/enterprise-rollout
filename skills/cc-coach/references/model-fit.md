@@ -12,6 +12,8 @@ a change. Hints use prompt keywords and can be wrong (including quoted text);
 they do not establish task boundaries or difficulty. Subagent workloads remain
 unknown. Missing effort remains unknown; visible thinking and output length
 cannot establish the configured effort.
+The parser reads Claude Code's top-level `effort` and `perTurnEffort`, preferring
+a recognized per-turn override, and also supports explicit request metadata.
 
 These are coaching starting points, not benchmark conclusions:
 

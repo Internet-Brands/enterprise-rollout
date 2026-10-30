@@ -243,11 +243,24 @@ bash run.sh --days 30 --json-out report.json
 
 Scope options (same on both platforms):
 
-- `--days N` — only sessions active in the last N days (across all projects)
+- `--days N` — include only entries timestamped within the last N days, including when combined with `--project` or `--session`
 - `--project ~/.claude/projects/<encoded-dir>` — a single project
 - `--session path/to/<id>.jsonl` — a single session
 - `--out-dir path/to/folder` — write the reports somewhere other than the current directory
 - *(no flags)* — same as `--days 30`: **all projects** active in the last 30 days
+
+The window is a rolling UTC interval applied to each transcript entry in main
+and subagent sessions. File modification dates are not used. A session touched
+recently does not bring older turns into the totals or grades. Missing/invalid
+timestamps are excluded and counted; timestamps without offsets are treated
+as UTC. Explicit `--project` or `--session` without `--days` includes that
+selection's full history. Both reports state the window; billing retains its
+separate calendar-month period.
+
+Reports before version 1.0.13 filtered files by modification date and could
+include older turns. Rerun for corrected totals and grades. A trend against an
+older report may reflect this scope fix rather than a change in your habits.
+
 
 ### Step 5 (optional): Build the budget packet
 

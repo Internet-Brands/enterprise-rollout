@@ -18,7 +18,7 @@ Data source (confirmed):
   - system entries mark compaction boundaries / summaries
 
 Usage:
-  python analyze.py                       # auto-discover newest project's sessions
+  python analyze.py                       # all projects, entries in last 30 days
   python analyze.py --project PATH        # a ~/.claude/projects/<dir> folder
   python analyze.py --session FILE.jsonl  # a single transcript
   python analyze.py --days 7              # only sessions active in last N days
@@ -174,9 +174,42 @@ def parse_ts(s):
     if not s:
         return None
     try:
-        return datetime.fromisoformat(s.replace("Z", "+00:00"))
-    except ValueError:
+        parsed = datetime.fromisoformat(s.replace("Z", "+00:00"))
+        # Older exports sometimes omit an offset; interpret those as UTC.
+        return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed.astimezone(timezone.utc)
+    except (ValueError, TypeError, AttributeError):
         return None
+
+
+def iter_scoped_lines(path, s, window_start=None, window_end=None):
+    """Filter events, never file mtimes; carry repo metadata without counting it.
+
+    Unknown dates are excluded only for a bounded window. All-history callers
+    retain the original behavior. Tool/read/task observations start in-window.
+    """
+    cwd = branch = None
+    for entry in iter_lines(path):
+        ts = parse_ts(entry.get("timestamp"))
+        if window_start is not None or window_end is not None:
+            if ts is None:
+                s.skipped_timestamp_entries += 1
+                continue
+            if window_end is not None and ts > window_end:
+                continue
+        if entry.get("cwd"):
+            if entry["cwd"] != cwd:
+                branch = None
+            cwd = entry["cwd"]
+        if entry.get("gitBranch"):
+            branch = entry["gitBranch"]
+        if window_start is not None and ts < window_start:
+            continue
+        entry = dict(entry)
+        if cwd:
+            entry.setdefault("cwd", cwd)
+        if branch:
+            entry.setdefault("gitBranch", branch)
+        yield entry
 
 
 # ----------------------------------------------------------------------------
@@ -290,6 +323,11 @@ class Stats:
         self.subagent_cache_read = 0
         self.subagent_cost_total = 0.0
 
+        self.window_start = None
+        self.window_end = None
+        self.skipped_timestamp_entries = 0
+        self.main_files = []
+        self.subagent_files = []
         self.models = Counter()
         self.fit_counts = Counter()
         self.cost_by_model = defaultdict(float)
@@ -397,10 +435,11 @@ def _is_noise_error(content_text: str, tool_name: str) -> bool:
     return False
 
 
-def analyze_files(files):
+def analyze_files(files, window_start=None, window_end=None):
     s = Stats()
+    s.window_start, s.window_end = window_start, window_end
     for path in files:
-        s.sessions += 1
+        included = False
         session_input = 0
         current_repo = "(unknown)"
         current_task = "unknown"
@@ -409,7 +448,11 @@ def analyze_files(files):
         read_paths = set()
         toolid_to_meta = {}  # tool_use_id -> {"name":..., "is_read":bool}
 
-        for entry in iter_lines(path):
+        for entry in iter_scoped_lines(path, s, window_start, window_end):
+            if not included:
+                s.sessions += 1
+                s.main_files.append(path)
+                included = True
             etype = entry.get("type")
             ts = parse_ts(entry.get("timestamp"))
             if ts:
@@ -595,7 +638,7 @@ def analyze_files(files):
     return s
 
 
-def fold_subagent_tokens(subagent_files, s):
+def fold_subagent_tokens(subagent_files, s, window_start=None, window_end=None):
     """
     Fold subagent token usage and cost into s's totals and per-repo attribution.
 
@@ -604,10 +647,14 @@ def fold_subagent_tokens(subagent_files, s):
     rate, batching, compaction, etc.) — only the billing / model-mix numbers.
     """
     for path in subagent_files:
-        s.subagent_sessions += 1
+        included = False
         current_repo = "(unknown)"
 
-        for entry in iter_lines(path):
+        for entry in iter_scoped_lines(path, s, window_start, window_end):
+            if not included:
+                s.subagent_sessions += 1
+                s.subagent_files.append(path)
+                included = True
             etype = entry.get("type")
             ts = parse_ts(entry.get("timestamp"))
             if ts:
@@ -1004,6 +1051,7 @@ def build_history_entry(s, ov_score, ov_letter, P, period_days, now=None):
         "timestamp": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "period": {
             "days": period_days,
+            "basis": "entry_timestamps",
             "start": s.first_ts.date().isoformat() if s.first_ts else None,
             "end": s.last_ts.date().isoformat() if s.last_ts else None,
         },
@@ -1166,12 +1214,24 @@ def _load_helpdesk_email():
     return "helpdesk2@internetbrands.com"
 
 
+def render_analysis_window(s):
+    if s.window_start is None:
+        return "**Analysis window:** full history of the explicitly selected transcripts.\n"
+    note = (f"**Analysis window:** {s.window_start.isoformat()} to "
+            f"{s.window_end.isoformat() if s.window_end else 'unbounded'} (UTC, entry timestamps; not file modification dates). "
+            "Billing figures cover their separately labeled calendar period.")
+    if s.skipped_timestamp_entries:
+        note += f" Excluded {s.skipped_timestamp_entries} entries with missing/invalid timestamps."
+    return note + "\n"
+
+
 def render_user_md(s, P, ov_score, ov_letter, files, ai_commits_data=None,
                    spend_data=None, overlap_frac=None, prev_spend_data=None,
                    now=None, trend=None):
     L = []
     L.append("# Claude Code Token-Optimization Report\n")
     L.append(f"_Generated {datetime.now().strftime('%Y-%m-%d %H:%M')}_\n")
+    L.append(render_analysis_window(s))
     span = ""
     if s.first_ts and s.last_ts:
         span = f" · {s.first_ts.date()} → {s.last_ts.date()}"
@@ -1444,7 +1504,8 @@ def render_it_md(s, P, ov_score, ov_letter, files, ai_commits_data=None,
 
     period_start = s.first_ts.strftime("%Y-%m-%d") if s.first_ts else "—"
     period_end   = s.last_ts.strftime("%Y-%m-%d")  if s.last_ts  else "—"
-    L.append(f"**Analysis window (transcripts):** {period_start} → {period_end}  ")
+    L.append(render_analysis_window(s))
+    L.append(f"**Included activity dates:** {period_start} → {period_end}  ")
     L.append(f"**Sessions:** {s.sessions} main + {s.subagent_sessions} subagent  ")
     if spend_data:
         _p = spend_data.get("period") or {}
@@ -1674,22 +1735,9 @@ def discover(args):
         main_files = glob.glob(os.path.join(root, "*", "*.jsonl"))
         subagent_files = glob.glob(os.path.join(root, "*", "*", "subagents", "*.jsonl"))
 
-    # Default scope: ALL projects, last 30 days. (The old default of "newest
-    # project only" silently dropped every other project's sessions and
-    # produced incomplete reports.)
-    days = args.days
-    if not days and args.project is None and args.session is None:
-        days = 30
-        print("Scope: all projects, last 30 days (default — pass --days, "
-              "--project or --session to change)", file=sys.stderr)
-
-    if days:
-        cutoff = datetime.now().timestamp() - days * 86400
-        main_files = [f for f in main_files if os.path.getmtime(f) >= cutoff]
-        subagent_files = [f for f in subagent_files if os.path.getmtime(f) >= cutoff]
-
-    return (sorted(main_files, key=os.path.getmtime),
-            sorted(subagent_files, key=os.path.getmtime))
+    # Every file is a candidate. Entry timestamps are filtered during parsing;
+    # mtimes cannot reliably identify activity in restored/exported transcripts.
+    return sorted(main_files), sorted(subagent_files)
 
 
 def main():
@@ -1707,7 +1755,8 @@ def main():
                     help="Base URL for AI commits API (set to '' to skip)")
     ap.add_argument("--project", help="a ~/.claude/projects/<dir> folder")
     ap.add_argument("--session", help="a single .jsonl transcript")
-    ap.add_argument("--days", type=int, default=0, help="only sessions active in last N days")
+    ap.add_argument("--days", type=int, default=None,
+                    help="include only entries timestamped in the last N days (default: 30 across all projects; full history for explicit --project/--session)")
     ap.add_argument("--month", type=int, default=None,
                     help="billing month to fetch authoritative spend for (default: current month)")
     ap.add_argument("--year", type=int, default=None,
@@ -1726,23 +1775,37 @@ def main():
                     help="skip reading and writing history.json entirely")
     args = ap.parse_args()
 
+    if args.days is not None and args.days <= 0:
+        ap.error("--days must be a positive number")
+    now = datetime.now(timezone.utc)
+    effective_days = args.days if args.days is not None else (None if args.project or args.session else 30)
+    window_start = now - timedelta(days=effective_days) if effective_days else None
+    window_end = now if effective_days else None
+    if effective_days:
+        print(f"Scope: entries timestamped {window_start.isoformat()} to {now.isoformat()} "
+              f"(last {effective_days} days, UTC)", file=sys.stderr)
     files, subagent_files = discover(args)
-    if not files:
+    if not files and not subagent_files:
         print(f"No .jsonl transcripts found under {args.root}. "
               f"Pass --session or --project.", file=sys.stderr)
         sys.exit(1)
 
-    s = analyze_files(files)
+    s = analyze_files(files, window_start, window_end)
     if subagent_files:
-        fold_subagent_tokens(subagent_files, s)
+        fold_subagent_tokens(subagent_files, s, window_start, window_end)
+    files = s.main_files
+    if not files and not s.subagent_files:
+        print("No transcript entries fall within the requested timestamp window. "
+              "Undated or invalid timestamps cannot be included in a bounded report.", file=sys.stderr)
+        sys.exit(1)
+    if s.skipped_timestamp_entries:
+        print(f"Skipped {s.skipped_timestamp_entries} entries with missing/invalid timestamps.", file=sys.stderr)
     P = score_practices(s)
     ov_score, ov_letter = overall(P)
 
     # Determine output directory.
     out_dir = os.path.expanduser(args.out_dir) if args.out_dir else os.getcwd()
     os.makedirs(out_dir, exist_ok=True)
-    now = datetime.now(timezone.utc)
-    effective_days = args.days or 30
 
     # history.json's default location is a FIXED per-user path, deliberately
     # NOT tied to --out-dir / the current working directory. The whole point
@@ -1787,7 +1850,7 @@ def main():
     # only a sliver of a multi-week analysis window — fetch the prior month
     # too (for both) so the report shows the complete picture rather than a
     # bare, easily-misread $0.00 / "no commit data found".
-    overlap_frac = billing_overlap_fraction(now - timedelta(days=effective_days), now,
+    overlap_frac = billing_overlap_fraction(window_start or s.first_ts, window_end or s.last_ts,
                                             month, year)
     prev_month, prev_year = (month - 1, year) if month > 1 else (12, year - 1)
     fetch_prev_month = overlap_frac is not None and overlap_frac < 0.5
@@ -1830,6 +1893,13 @@ def main():
         "overall_score": round(ov_score, 1),
         "overall_grade": ov_letter,
         "trend": trend,
+        "analysis_window": {
+            "days": effective_days,
+            "start": window_start.isoformat() if window_start else None,
+            "end": window_end.isoformat() if window_end else None,
+            "timestamp_policy": "UTC; naive timestamps interpreted as UTC; undated entries excluded for bounded windows",
+            "skipped_timestamp_entries": s.skipped_timestamp_entries,
+        },
         "model_fit": model_fit.assessment(s, THRESHOLDS["big_session_tokens"]),
         "sessions": s.sessions,
         "subagent_sessions": s.subagent_sessions,

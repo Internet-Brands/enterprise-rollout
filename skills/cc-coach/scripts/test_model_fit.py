@@ -12,6 +12,18 @@ import model_fit
 
 
 class FitTests(unittest.TestCase):
+    def test_claude_code_effort_fields_and_per_turn_override(self):
+        for level in ("low", "medium", "high", "xhigh", "max"):
+            with self.subTest(level=level):
+                self.assertEqual(model_fit.logged_effort({"effort": level}), level)
+        self.assertEqual(model_fit.logged_effort({"effort": "high", "perTurnEffort": "medium"}), "medium")
+        self.assertEqual(model_fit.logged_effort({"effort": "high", "perTurnEffort": None}), "high")
+        self.assertEqual(model_fit.logged_effort({"perTurnEffort": "medium"}), "medium")
+        self.assertEqual(model_fit.logged_effort({"effort": "auto"}), "unknown")
+        self.assertEqual(model_fit.logged_effort({"perTurnEffort": 100}), "unknown")
+        self.assertEqual(model_fit.logged_effort({"message": {"content": [{"type": "thinking"}]}}), "unknown")
+        self.assertEqual(model_fit.logged_effort({"message": {"output_config": {"effort": "low"}}}), "low")
+
     def test_version_prices_and_cache_duration(self):
         usage = dict(input_tokens=1000, output_tokens=1000,
                      cache_creation_input_tokens=1000, cache_read_input_tokens=1000,

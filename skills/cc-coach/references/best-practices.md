@@ -320,3 +320,26 @@ and defensible:
 The packet's recommendation (`build_packet.py:recommend`) maps the overall grade
 to Approve (A/B), Approve-with-conditions (C, or a large ask), or Coach-first
 (D/F), and is meant to be tuned to your org's risk tolerance.
+
+
+## Timestamp windows (1.0.13)
+
+A bounded report includes only entries timestamped within the requested rolling
+UTC window (inclusive boundaries). Main and subagent transcripts use the same
+bounds. Discovery considers all candidate files regardless of modification date,
+so restored transcripts are not silently dropped. Missing/invalid dates are
+excluded and counted; offset-free timestamps are interpreted as UTC. Sessions
+with no included entries do not affect counts or scores. Earlier repo metadata
+can provide attribution, but old tokens, tools, commits, compactions and model
+usage are not counted. Tool/read/task observations begin within the window.
+
+The no-flag default is 30 days across all projects. Explicit project/session
+selection without `--days` retains full-history behavior and is labeled as such.
+`analysis_window` in JSON records the requested bounds and timestamp policy.
+Billing remains a separately labeled calendar-month figure, not a reconciled
+rolling-window bill. No rubric weights, score formulas or approval rules change.
+
+Before 1.0.13, `--days` selected files by mtime and counted their entire contents;
+explicit `--session` bypassed that filter. Trend comparisons spanning this fix
+can reflect corrected scope rather than improved or worsened habits. New history
+entries record `period.basis = entry_timestamps`; old entries remain intact.
